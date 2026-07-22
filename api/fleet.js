@@ -1,9 +1,20 @@
-import { kvGet, kvSMembers, kvConfigured } from '../lib/kv.js';
+import { kvGet, kvSMembers, kvConfigured, kvDel, kvSRem } from '../lib/kv.js';
 
 export default async function handler(req, res) {
   const token = process.env.DASHBOARD_TOKEN || '';
-  if (token && req.query.key !== token) return res.status(401).send('Unauthorized — append ?key=YOUR_TOKEN');
+  const key = req.query.key || '';
+  if (token && key !== token) return res.status(401).send('Unauthorized — append ?key=YOUR_TOKEN');
   if (!kvConfigured()) return res.status(500).send('KV not configured');
+
+  // Remove a site from the fleet (retired/decommissioned, or a test entry).
+  if (req.query.remove) {
+    const host = String(req.query.remove).toLowerCase();
+    await kvDel(`site:${host}`);
+    await kvSRem('sites', host);
+    const back = `/api/fleet${token ? `?key=${encodeURIComponent(key)}` : ''}`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send(`Removed <code>${esc(host)}</code>. <a href="${esc(back)}">Back to the dashboard</a>. (It will reappear if that site sends another heartbeat.)`);
+  }
 
   const hosts = await kvSMembers('sites');
   const now = Date.now();
@@ -31,6 +42,7 @@ export default async function handler(req, res) {
       <td>${esc(r.wp_version)}</td>
       <td>${ago(age)}</td>
       <td><span style="color:${color};font-weight:600">● ${label}</span></td>
+      <td><a href="?remove=${encodeURIComponent(hostOf(r.site_url))}${token ? `&key=${encodeURIComponent(key)}` : ''}" onclick="return confirm('Remove ${esc(hostOf(r.site_url))} from the fleet?')" style="color:#dc2626;text-decoration:none">remove</a></td>
     </tr>`;
   };
   const html = `<!doctype html><meta charset="utf-8"><title>TFM Fleet</title>
@@ -45,8 +57,8 @@ export default async function handler(req, res) {
   </style>
   <h1>TFM Fleet — Sites &amp; Versions</h1>
   <div class="sub">${rows.length} site(s) reporting · ${versions.size} plugin version(s) in use · updated ${new Date(now).toISOString()}</div>
-  <table><thead><tr><th>Site</th><th>Domain</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Last seen</th><th>Status</th></tr></thead>
-  <tbody>${rows.map(cell).join('') || '<tr><td colspan="7">No sites have checked in yet.</td></tr>'}</tbody></table>`;
+  <table><thead><tr><th>Site</th><th>Domain</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Last seen</th><th>Status</th><th></th></tr></thead>
+  <tbody>${rows.map(cell).join('') || '<tr><td colspan="8">No sites have checked in yet.</td></tr>'}</tbody></table>`;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.status(200).send(html);
 }

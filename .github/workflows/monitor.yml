@@ -8,7 +8,7 @@ name: Fleet down-check
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # every ~10 min (GitHub may delay under load; that's fine)
+    - cron: '*/5 * * * *'    # every ~5 min: warms each site's wp-cron + checks for down (GitHub may delay under load; that's fine)
   workflow_dispatch: {}        # allows a manual run from the Actions tab
 
 jobs:

@@ -8,15 +8,21 @@ export default async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
   body = body || {};
-  const { site_url, site_name, plugin_version, php_version, wp_version } = body;
+  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts } = body;
   if (!site_url) return res.status(400).json({ error: 'missing site_url' });
 
   const host = hostOf(site_url);
   const now = Date.now();
   const prev = await kvGet(`site:${host}`);
+  const cs = custom_scripts && typeof custom_scripts === 'object' ? custom_scripts : {};
   const rec = {
     host, site_url, site_name: site_name || host,
     plugin_version: plugin_version || '', php_version: php_version || '', wp_version: wp_version || '',
+    custom_scripts: {
+      head: Boolean(cs.head),
+      footer: Boolean(cs.footer),
+      total_bytes: Number(cs.total_bytes) || 0,
+    },
     last_seen: now, status: 'up', down_since: null,
   };
   await kvSet(`site:${host}`, rec);

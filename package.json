@@ -1,0 +1,7 @@
+{
+  "name": "tfm-alert-relay",
+  "version": "1.0.0",
+  "description": "Receives critical activity alerts from the TFM Custom Functions plugin (fleet of ~50 WordPress sites) and creates a task in a central ClickUp list. Holds the ClickUp token server-side so no site needs a credential.",
+  "private": true,
+  "type": "module"
+}

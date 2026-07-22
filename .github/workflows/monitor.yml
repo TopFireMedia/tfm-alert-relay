@@ -1,0 +1,25 @@
+name: Fleet down-check
+
+# Site-down detection. A site that's down can't report itself, so this runs
+# on a schedule and asks the relay's /api/monitor to flag any site that has
+# stopped sending heartbeats (confirmed by a direct request before alerting).
+# Vercel's native cron needs a paid plan, so we drive it from GitHub Actions
+# (free). Cadence is well inside the relay's 45-minute "down" threshold.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every ~10 min (GitHub may delay under load; that's fine)
+  workflow_dispatch: {}        # allows a manual run from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the monitor endpoint
+        run: |
+          code=$(curl -s -o /tmp/out.txt -w "%{http_code}" -m 30 \
+            https://tfm-alert-relay.vercel.app/api/monitor)
+          echo "monitor returned HTTP $code"
+          cat /tmp/out.txt || true
+          echo
+          test "$code" = "200"

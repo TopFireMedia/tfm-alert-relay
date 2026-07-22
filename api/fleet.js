@@ -54,10 +54,11 @@ export default async function handler(req, res) {
     const ccCell = cc
       ? `<span class="cc-yes" title="Head: ${r.custom_scripts.head ? 'yes' : 'no'} · Footer: ${r.custom_scripts.footer ? 'yes' : 'no'}">Yes · ${fmtBytes(r.custom_scripts.total_bytes || 0)}</span>`
       : `<span class="cc-no">&mdash;</span>`;
+    const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
     const filterKey = esc(((r.site_name || '') + ' ' + host).toLowerCase());
     return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-filter="${filterKey}">
       <td class="c-name">${esc(r.site_name)}</td>
-      <td><a class="c-dom" href="${esc(r.site_url)}" target="_blank" rel="noopener">${esc(host)}</a></td>
+      <td><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></td>
       <td>${verCell}</td>
       <td class="c-mut">${esc(r.php_version || '—')}</td>
       <td class="c-mut">${esc(r.wp_version || '—')}</td>

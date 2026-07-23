@@ -1,43 +1,60 @@
-import { kvGet, kvSet, kvSMembers, kvConfigured } from '../lib/kv.js';
+import { kvMGet, kvSet, kvSMembers, kvConfigured } from '../lib/kv.js';
 import { createClickUpTask } from '../lib/clickup.js';
 
-const THRESHOLD_MS = 45 * 60 * 1000; // no heartbeat for 45 min
+// Up/down is decided by DIRECTLY PINGING each site, not by whether it phoned
+// home — a heartbeat can lag on a low-traffic site, but a ping is authoritative.
+const CONFIRM_FAILS = 2;                 // consecutive failed pings before declaring "down" (rides out a transient blip)
+const FRESH_WRITE_MS = 8 * 60 * 1000;    // for a still-up site, only re-write last_seen if it's older than this (saves KV writes)
 
 export default async function handler(req, res) {
   if (!kvConfigured()) return res.status(500).json({ error: 'KV not configured' });
   const hosts = await kvSMembers('sites');
-  const now = Date.now();
-  const alerted = [];
+  if (!hosts.length) return res.status(200).json({ ok: true, checked: 0, alerted: [], recovered: [] });
 
-  // Load every site, then ping them all concurrently. The ping does double duty:
-  // it wakes each site's wp-cron (so the heartbeat fires on schedule even on a
-  // zero-traffic site, keeping "last seen" fresh) AND confirms reachability
-  // before we ever cry "down". Concurrency keeps us inside the function time
-  // limit even with a large fleet.
-  const recs = (await Promise.all(hosts.map(h => kvGet(`site:${h}`)))).filter(Boolean);
+  const now = Date.now();
+  const recs = (await kvMGet(hosts.map(h => `site:${h}`))).filter(Boolean);
   const reachables = await Promise.all(recs.map(r => ping(r.site_url)));
 
-  for (let i = 0; i < recs.length; i++) {
-    const rec = recs[i];
-    const reachable = reachables[i];
+  const alerted = [], recovered = [];
+  await Promise.all(recs.map(async (rec, i) => {
+    if (reachables[i]) {
+      const wasDown = rec.status === 'down';
+      const stale = (now - (rec.last_seen || 0)) >= FRESH_WRITE_MS;
+      if (wasDown || stale || rec.ping_fails) {
+        rec.status = 'up'; rec.last_seen = now; rec.last_ping = now;
+        rec.down_since = null; rec.ping_fails = 0;
+        await kvSet(`site:${rec.host}`, rec);
+      }
+      if (wasDown) {
+        recovered.push(rec.host);
+        try {
+          await createClickUpTask({
+            title: `🟢 Recovered — ${rec.site_name}`,
+            description: `**Site:** ${rec.site_name} (${rec.site_url})\nBack up — a direct check succeeded.\n**Plugin:** ${rec.plugin_version}`,
+            tags: [rec.host, 'recovered'],
+          });
+        } catch (e) { /* non-fatal */ }
+      }
+    } else {
+      rec.ping_fails = (rec.ping_fails || 0) + 1;
+      rec.last_ping = now;
+      const goingDown = rec.status !== 'down' && rec.ping_fails >= CONFIRM_FAILS;
+      if (goingDown) { rec.status = 'down'; rec.down_since = now; }
+      await kvSet(`site:${rec.host}`, rec);
+      if (goingDown) {
+        alerted.push(rec.host);
+        try {
+          await createClickUpTask({
+            title: `🔴 Site Down — ${rec.site_name}`,
+            description: `**Site:** ${rec.site_name} (${rec.site_url})\nA direct check failed ${rec.ping_fails}× in a row.\n**Last plugin version:** ${rec.plugin_version}`,
+            tags: [rec.host, 'down'],
+          });
+        } catch (e) { /* non-fatal */ }
+      }
+    }
+  }));
 
-    if (rec.status === 'down') continue;               // recovery is handled by the heartbeat when it returns
-    if (now - rec.last_seen <= THRESHOLD_MS) continue; // still fresh
-    if (reachable) continue;                           // stale but reachable — the nudge above should refresh it
-
-    rec.status = 'down'; rec.down_since = now;
-    await kvSet(`site:${rec.host}`, rec);
-    const mins = Math.round((now - rec.last_seen) / 60000);
-    try {
-      await createClickUpTask({
-        title: `🔴 Site Down — ${rec.site_name}`,
-        description: `**Site:** ${rec.site_name} (${rec.site_url})\n**No heartbeat for ~${mins} min** and a direct check failed.\n**Last plugin version:** ${rec.plugin_version}`,
-        tags: [rec.host, 'down'],
-      });
-      alerted.push(rec.host);
-    } catch (e) { /* non-fatal */ }
-  }
-  return res.status(200).json({ ok: true, checked: recs.length, alerted });
+  return res.status(200).json({ ok: true, checked: recs.length, alerted, recovered });
 }
 
 async function ping(url) {

@@ -24,7 +24,7 @@ export default async function handler(req, res) {
   const now = Date.now();
   const rows = [];
   for (const host of hosts) { const r = await kvGet(`site:${host}`); if (r) rows.push(r); }
-  rows.sort((a, b) => (a.site_name || '').localeCompare(b.site_name || ''));
+  rows.sort((a, b) => (decodeEntities(a.site_name) || '').localeCompare(decodeEntities(b.site_name) || ''));
 
   if (req.query.format === 'json') {
     res.setHeader('Content-Type', 'application/json');
@@ -34,6 +34,7 @@ export default async function handler(req, res) {
   const STALE = 45 * 60 * 1000;
   const statusOf = (r) => (r.status === 'down' ? 'down' : ((now - (r.last_seen || 0)) > STALE ? 'stale' : 'up'));
   const hasCustom = (r) => !!(r.custom_scripts && (r.custom_scripts.head || r.custom_scripts.footer));
+  const hasScf = (r) => !!r.scf_active;
   const versions = rows.map(r => r.plugin_version).filter(Boolean);
   const latest = versions.slice().sort(cmpVer).pop() || '';
   const nUp = rows.filter(r => statusOf(r) === 'up').length;
@@ -42,27 +43,34 @@ export default async function handler(req, res) {
   const nVer = new Set(versions).size;
   const nOutdated = rows.filter(r => r.plugin_version && latest && cmpVer(r.plugin_version, latest) < 0).length;
   const nCustom = rows.filter(hasCustom).length;
+  const nScf = rows.filter(hasScf).length;
 
   const rowsHtml = rows.map(r => {
     const st = statusOf(r);
     const label = st === 'down' ? 'Down' : (st === 'stale' ? 'Stale' : 'Up');
     const host = hostOf(r.site_url);
+    const name = decodeEntities(r.site_name);
     const outdated = r.plugin_version && latest && cmpVer(r.plugin_version, latest) < 0;
     const ver = esc(r.plugin_version || '—');
     const verCell = `<span class="ver ${outdated ? 'ver-old' : 'ver-cur'}"${outdated ? ` title="Behind latest (${esc(latest)})"` : ''}>${ver}${outdated ? ' &#9650;' : ''}</span>`;
     const cc = hasCustom(r);
     const ccCell = cc
-      ? `<span class="cc-yes" title="Head: ${r.custom_scripts.head ? 'yes' : 'no'} · Footer: ${r.custom_scripts.footer ? 'yes' : 'no'}">Yes · ${fmtBytes(r.custom_scripts.total_bytes || 0)}</span>`
-      : `<span class="cc-no">&mdash;</span>`;
+      ? `<span class="tag tag-warn" title="Head: ${r.custom_scripts.head ? 'yes' : 'no'} · Footer: ${r.custom_scripts.footer ? 'yes' : 'no'}">Yes · ${fmtBytes(r.custom_scripts.total_bytes || 0)}</span>`
+      : `<span class="c-mut">&mdash;</span>`;
+    const scf = hasScf(r);
+    const scfCell = scf
+      ? `<span class="tag tag-info" title="Secure Custom Fields / ACF is active">Active</span>`
+      : `<span class="c-mut">&mdash;</span>`;
     const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
-    const filterKey = esc(((r.site_name || '') + ' ' + host).toLowerCase());
-    return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-filter="${filterKey}">
-      <td class="c-name">${esc(r.site_name)}</td>
+    const filterKey = esc((name + ' ' + host).toLowerCase());
+    return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-filter="${filterKey}">
+      <td class="c-name">${esc(name)}</td>
       <td><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></td>
       <td>${verCell}</td>
       <td class="c-mut">${esc(r.php_version || '—')}</td>
       <td class="c-mut">${esc(r.wp_version || '—')}</td>
       <td>${ccCell}</td>
+      <td>${scfCell}</td>
       <td class="c-mut">${ago(now - (r.last_seen || 0))}</td>
       <td><span class="pill st-${st}"><span class="dot"></span>${label}</span></td>
       <td class="c-act"><button class="rm" onclick="tfmRemove(this)" title="Remove from fleet" aria-label="Remove site">&#10005;</button></td>
@@ -75,7 +83,7 @@ export default async function handler(req, res) {
 <style>
   :root{
     --bg:#f5f6f8; --card:#ffffff; --ink:#1a1d21; --mut:#6b7280; --line:#e6e8ec;
-    --up:#16a34a; --stale:#d97706; --down:#dc2626; --accentA:#f97316; --accentB:#ef4444;
+    --up:#16a34a; --stale:#d97706; --down:#dc2626; --info:#2563eb; --accentA:#f97316; --accentB:#ef4444;
     --shadow:0 1px 2px rgba(16,24,40,.06),0 4px 16px rgba(16,24,40,.06);
   }
   @media(prefers-color-scheme:dark){:root{
@@ -86,7 +94,7 @@ export default async function handler(req, res) {
   body{margin:0;background:var(--bg);color:var(--ink);
     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased}
-  .wrap{max-width:1140px;margin:0 auto;padding:28px 20px 56px}
+  .wrap{max-width:1200px;margin:0 auto;padding:28px 20px 56px}
   header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}
   .brand{display:flex;align-items:center;gap:12px;flex:1;min-width:220px}
   .mark{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;font-size:22px;
@@ -102,13 +110,14 @@ export default async function handler(req, res) {
   .btn{background:var(--card);border:1px solid var(--line);color:var(--ink);
     padding:.5rem .8rem;border-radius:9px;font-size:.9rem;cursor:pointer;font-weight:500}
   .btn:hover{border-color:var(--accentB);color:var(--accentB)}
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px}
   .stat{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:15px 16px;box-shadow:var(--shadow)}
   .stat .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);font-weight:600}
   .stat .v{font-size:1.85rem;font-weight:700;margin-top:4px;line-height:1;display:flex;align-items:baseline;gap:8px}
   .stat .v small{font-size:.72rem;font-weight:600;color:var(--mut)}
   .stat.up .v{color:var(--up)} .stat.attn .v{color:var(--stale)} .stat.attn.zero .v{color:var(--ink)}
   .stat.cc .v{color:var(--stale)} .stat.cc.zero .v{color:var(--up)}
+  .stat.scf .v{color:var(--info)} .stat.scf.zero .v{color:var(--up)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
   .table-wrap{overflow-x:auto}
   table{border-collapse:collapse;width:100%;font-size:.9rem}
@@ -126,9 +135,9 @@ export default async function handler(req, res) {
   .ver{display:inline-block;font:600 .78rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;
     padding:.28rem .5rem;border-radius:6px;background:color-mix(in srgb,var(--ink) 7%,transparent)}
   .ver-old{background:color-mix(in srgb,var(--stale) 18%,transparent);color:var(--stale)}
-  .cc-yes{display:inline-block;font-weight:600;font-size:.8rem;color:var(--stale);
-    background:color-mix(in srgb,var(--stale) 15%,transparent);padding:.24rem .5rem;border-radius:6px;white-space:nowrap}
-  .cc-no{color:var(--mut)}
+  .tag{display:inline-block;font-weight:600;font-size:.78rem;padding:.24rem .5rem;border-radius:6px;white-space:nowrap}
+  .tag-warn{color:var(--stale);background:color-mix(in srgb,var(--stale) 15%,transparent)}
+  .tag-info{color:var(--info);background:color-mix(in srgb,var(--info) 14%,transparent)}
   .pill{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:.82rem;white-space:nowrap}
   .pill .dot{width:8px;height:8px;border-radius:50%;box-shadow:0 0 0 3px color-mix(in srgb,currentColor 18%,transparent)}
   .st-up{color:var(--up)} .st-stale{color:var(--stale)} .st-down{color:var(--down)}
@@ -151,7 +160,8 @@ export default async function handler(req, res) {
     </div>
     <div class="tools">
       <input id="q" class="search" placeholder="Filter sites&hellip;" autocomplete="off">
-      <label class="toggle"><input type="checkbox" id="cconly"> Needs migration</label>
+      <label class="toggle"><input type="checkbox" id="cconly"> Custom code</label>
+      <label class="toggle"><input type="checkbox" id="scfonly"> SCF active</label>
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
     </div>
   </header>
@@ -162,19 +172,20 @@ export default async function handler(req, res) {
     <div class="stat attn ${(nDown + nStale) ? '' : 'zero'}"><div class="k">Needs attention</div><div class="v" id="stat-attn">${nDown + nStale}<small>${nDown} down &middot; ${nStale} stale</small></div></div>
     <div class="stat"><div class="k">Plugin versions</div><div class="v" id="stat-ver">${nVer}<small>${nOutdated} behind latest</small></div></div>
     <div class="stat cc ${nCustom ? '' : 'zero'}"><div class="k">Custom code</div><div class="v" id="stat-cc">${nCustom}<small>to migrate to Elementor</small></div></div>
+    <div class="stat scf ${nScf ? '' : 'zero'}"><div class="k">SCF active</div><div class="v" id="stat-scf">${nScf}<small>can be removed elsewhere</small></div></div>
   </div>
 
   <div class="card"><div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Site</th><th>Domain</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Custom code</th><th>Last seen</th><th>Status</th><th></th>
+        <th>Site</th><th>Admin</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Custom code</th><th>SCF</th><th>Last seen</th><th>Status</th><th></th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>
     <div id="empty" style="display:${rows.length ? 'none' : 'block'}">No sites have checked in yet.</div>
   </div></div>
 
-  <div class="foot"><span class="live"></span> Live &middot; auto-refreshes every 60s &middot; data via plugin heartbeat</div>
+  <div class="foot"><span class="live"></span> Live &middot; status by direct ping &middot; auto-refreshes every 60s</div>
 </div>
 <script>
 (function(){
@@ -183,15 +194,16 @@ export default async function handler(req, res) {
   function num(id,n){ var el=document.getElementById(id); if(el) el.firstChild.nodeValue=String(n); }
   function recount(){
     var trs = document.querySelectorAll('tbody tr[data-host]');
-    var up=0, attn=0, custom=0, vers={};
+    var up=0, attn=0, custom=0, scf=0, vers={};
     trs.forEach(function(tr){
       var s=tr.getAttribute('data-status');
       if(s==='up') up++; else attn++;
       if(tr.getAttribute('data-custom')==='1') custom++;
+      if(tr.getAttribute('data-scf')==='1') scf++;
       var v=tr.getAttribute('data-ver'); if(v) vers[v]=1;
     });
     num('stat-total', trs.length); num('stat-up', up); num('stat-attn', attn);
-    num('stat-ver', Object.keys(vers).length); num('stat-cc', custom);
+    num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf);
     var empty=document.getElementById('empty');
     if(empty) empty.style.display = trs.length ? 'none' : 'block';
   }
@@ -207,14 +219,17 @@ export default async function handler(req, res) {
   function applyFilter(){
     var v = (document.getElementById('q').value || '').trim().toLowerCase();
     var ccOnly = document.getElementById('cconly').checked;
+    var scfOnly = document.getElementById('scfonly').checked;
     document.querySelectorAll('tbody tr[data-host]').forEach(function(tr){
       var matchText = !v || tr.getAttribute('data-filter').indexOf(v) > -1;
       var matchCc = !ccOnly || tr.getAttribute('data-custom') === '1';
-      tr.style.display = (matchText && matchCc) ? '' : 'none';
+      var matchScf = !scfOnly || tr.getAttribute('data-scf') === '1';
+      tr.style.display = (matchText && matchCc && matchScf) ? '' : 'none';
     });
   }
   document.getElementById('q').addEventListener('input', applyFilter);
   document.getElementById('cconly').addEventListener('change', applyFilter);
+  document.getElementById('scfonly').addEventListener('change', applyFilter);
   setTimeout(function(){ location.reload(); }, 60000);
 })();
 </script>
@@ -224,6 +239,17 @@ export default async function handler(req, res) {
 }
 
 function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// Decode HTML entities that may be baked into a stored site name (e.g. an
+// apostrophe as &#039;), so it displays as text rather than the raw entity.
+function decodeEntities(s){
+  return String(s ?? '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => codePoint(parseInt(d, 10)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+function codePoint(n){ try { return String.fromCodePoint(n); } catch { return ''; } }
 function hostOf(u){ try { return new URL(u).host.replace(/:\d+$/, ''); } catch { return String(u || ''); } }
 function ago(ms){ if(!ms || ms < 0) return '—'; const m = Math.round(ms/60000); if(m < 1) return 'just now'; if(m < 60) return m + ' min ago'; const h = Math.round(m/60); if(h < 48) return h + ' h ago'; return Math.round(h/24) + ' d ago'; }
 function fmtBytes(n){ n = Number(n) || 0; if(n < 1024) return n + ' B'; return (n/1024).toFixed(n < 10240 ? 1 : 0) + ' KB'; }

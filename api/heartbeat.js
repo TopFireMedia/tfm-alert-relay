@@ -8,7 +8,7 @@ export default async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
   body = body || {};
-  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts } = body;
+  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active } = body;
   if (!site_url) return res.status(400).json({ error: 'missing site_url' });
 
   const host = hostOf(site_url);
@@ -23,7 +23,10 @@ export default async function handler(req, res) {
       footer: Boolean(cs.footer),
       total_bytes: Number(cs.total_bytes) || 0,
     },
-    last_seen: now, status: 'up', down_since: null,
+    scf_active: Boolean(scf_active),
+    // A heartbeat is also positive proof the site is up.
+    last_seen: now, last_ping: prev && prev.last_ping ? prev.last_ping : now,
+    status: 'up', down_since: null, ping_fails: 0,
   };
   await kvSet(`site:${host}`, rec);
   await kvSAdd('sites', host);

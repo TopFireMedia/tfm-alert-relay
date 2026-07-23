@@ -3,7 +3,7 @@ import { createClickUpTask } from '../lib/clickup.js';
 
 // Up/down is decided by DIRECTLY PINGING each site, not by whether it phoned
 // home — a heartbeat can lag on a low-traffic site, but a ping is authoritative.
-const CONFIRM_FAILS = 2;                 // consecutive failed pings before declaring "down" (rides out a transient blip)
+const CONFIRM_FAILS = 3;                 // consecutive failed pings before declaring "down" (rides out transient blips / slow hosts)
 const FRESH_WRITE_MS = 8 * 60 * 1000;    // for a still-up site, only re-write last_seen if it's older than this (saves KV writes)
 
 export default async function handler(req, res) {
@@ -60,7 +60,7 @@ export default async function handler(req, res) {
 async function ping(url) {
   try {
     const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 5000);
+    const t = setTimeout(() => c.abort(), 10000);
     const r = await fetch(url, { method: 'GET', redirect: 'follow', signal: c.signal, headers: { 'User-Agent': 'TFM-Monitor' } });
     clearTimeout(t);
     return r.status > 0 && r.status < 500; // any non-server-error response = server is up

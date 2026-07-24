@@ -1,15 +1,16 @@
 import { kvMGet, kvSet, kvSMembers, kvConfigured } from '../lib/kv.js';
 import { createClickUpTask } from '../lib/clickup.js';
 
-// A site is "up" if we can reach it by a direct ping OR it recently sent a
-// heartbeat. It's only "down" if BOTH fail: consecutive pings fail AND it hasn't
-// checked in for a while. This avoids false downs when our datacenter ping is
-// firewall-blocked/timed-out but the site is actually fine (proven by its
-// outbound heartbeat).
-const CONFIRM_FAILS = 3;                    // consecutive failed pings before "down" is even possible
-const FRESH_WRITE_MS = 8 * 60 * 1000;       // only re-write a healthy site's last_seen when it's older than this (saves KV writes)
-const HEARTBEAT_GRACE_MS = 30 * 60 * 1000;  // a heartbeat within this window vetoes a "down"
-const PING_TIMEOUT_MS = 6000;               // well under the 10s function ceiling so pings aren't mass-aborted
+// "Down" means we have NOT heard from a site by ANY means — neither its outbound
+// heartbeat nor a successful inbound ping — for DOWN_AFTER_MS. A failed ping on
+// its own never marks a site down: pinging dozens of sites from a 10s serverless
+// function (and from a datacenter IP that WAFs may block) is inherently flaky, so
+// the ping is only ever a POSITIVE signal that refreshes freshness. This makes
+// false downs essentially impossible while still catching genuinely dead sites.
+const DOWN_AFTER_MS = 45 * 60 * 1000;      // no contact (heartbeat or good ping) for this long => down
+const FRESH_WRITE_MS = 10 * 60 * 1000;     // on a good ping, only re-write last_seen if older than this (saves KV writes)
+const RECOVER_NOTIFY_MS = 15 * 60 * 1000;  // only send a "recovered" alert if it was actually down this long (suppresses flap/false-down noise)
+const PING_TIMEOUT_MS = 4000;              // short + best-effort; aborted pings are harmless
 
 export default async function handler(req, res) {
   if (!kvConfigured()) return res.status(500).json({ error: 'KV not configured' });
@@ -23,55 +24,52 @@ export default async function handler(req, res) {
   const alerted = [], recovered = [];
   await Promise.all(recs.map(async (rec, i) => {
     const reachable = reachables[i];
-    // "Seen recently" = confirmed alive by ANY means within the grace window
-    // (a heartbeat, or a past successful ping). For a site whose inbound ping is
-    // failing, last_seen reflects its last heartbeat — so this vetoes false downs
-    // without depending on the newly-added last_heartbeat field being present.
-    const seenRecently = (now - (rec.last_seen || 0)) < HEARTBEAT_GRACE_MS;
-    const alive = reachable || seenRecently;
+    const lastSeen = rec.last_seen || 0;
+    const wasDown = rec.status === 'down';
+    const downMs = wasDown && rec.down_since ? now - rec.down_since : 0;
 
-    if (alive) {
-      const wasDown = rec.status === 'down';
-      const needRefresh = reachable && (now - (rec.last_seen || 0)) >= FRESH_WRITE_MS;
-      if (wasDown || rec.ping_fails || needRefresh) {
-        rec.status = 'up';
-        rec.down_since = null;
-        rec.ping_fails = 0;
-        if (reachable) { rec.last_seen = now; rec.last_ping = now; }
+    if (reachable) {
+      if (wasDown || (now - lastSeen) >= FRESH_WRITE_MS) {
+        rec.status = 'up'; rec.down_since = null; rec.ping_fails = 0;
+        rec.last_seen = now; rec.last_ping = now;
         await kvSet(`site:${rec.host}`, rec);
       }
-      if (wasDown) {
-        recovered.push(rec.host);
-        try {
-          await createClickUpTask({
-            title: `🟢 Recovered — ${rec.site_name}`,
-            description: `**Site:** ${rec.site_name} (${rec.site_url})\nBack up (${reachable ? 'direct check succeeded' : 'heartbeat received'}).\n**Plugin:** ${rec.plugin_version}`,
-            tags: [rec.host, 'recovered'],
-          });
-        } catch (e) { /* non-fatal */ }
-      }
-    } else {
-      // Unreachable AND no recent heartbeat.
-      rec.ping_fails = (rec.ping_fails || 0) + 1;
-      rec.last_ping = now;
-      const goingDown = rec.status !== 'down' && rec.ping_fails >= CONFIRM_FAILS;
-      if (goingDown) { rec.status = 'down'; rec.down_since = now; }
+      if (wasDown) recover(rec, recovered, 'a direct check succeeded', downMs);
+      return;
+    }
+
+    // Ping failed — decide purely on how long since we last heard from it.
+    const stale = (now - lastSeen) >= DOWN_AFTER_MS;
+    if (wasDown && !stale) {
+      rec.status = 'up'; rec.down_since = null; rec.ping_fails = 0;
       await kvSet(`site:${rec.host}`, rec);
-      if (goingDown) {
-        alerted.push(rec.host);
-        const quietMin = Math.round((now - (rec.last_seen || now)) / 60000);
-        try {
-          await createClickUpTask({
-            title: `🔴 Site Down — ${rec.site_name}`,
-            description: `**Site:** ${rec.site_name} (${rec.site_url})\nDirect check failed ${rec.ping_fails}× in a row AND not seen for ~${quietMin} min.\n**Last plugin version:** ${rec.plugin_version}`,
-            tags: [rec.host, 'down'],
-          });
-        } catch (e) { /* non-fatal */ }
-      }
+      recover(rec, recovered, 'a heartbeat was received', downMs);
+    } else if (!wasDown && stale) {
+      rec.status = 'down'; rec.down_since = now;
+      await kvSet(`site:${rec.host}`, rec);
+      alerted.push(rec.host);
+      const quietMin = Math.round((now - lastSeen) / 60000);
+      try {
+        await createClickUpTask({
+          title: `🔴 Site Down — ${rec.site_name}`,
+          description: `**Site:** ${rec.site_name} (${rec.site_url})\nNo heartbeat and no successful direct check for ~${quietMin} min.\n**Last plugin version:** ${rec.plugin_version}`,
+          tags: [rec.host, 'down'],
+        });
+      } catch (e) { /* non-fatal */ }
     }
   }));
 
   return res.status(200).json({ ok: true, checked: recs.length, alerted, recovered });
+}
+
+function recover(rec, recovered, why, downMs) {
+  recovered.push(rec.host);
+  if (downMs < RECOVER_NOTIFY_MS) return; // brief blip / false down being cleared — recover silently
+  createClickUpTask({
+    title: `🟢 Recovered — ${rec.site_name}`,
+    description: `**Site:** ${rec.site_name} (${rec.site_url})\nBack up after ~${Math.round(downMs / 60000)} min — ${why}.\n**Plugin:** ${rec.plugin_version}`,
+    tags: [rec.host, 'recovered'],
+  }).catch(() => { /* non-fatal */ });
 }
 
 async function ping(url) {
@@ -82,10 +80,9 @@ async function ping(url) {
       method: 'GET',
       redirect: 'follow',
       signal: c.signal,
-      // A browser-like UA so security plugins/WAFs are less likely to block us.
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TFM-Monitor/1.0; +https://topfiremedia.com)' },
     });
     clearTimeout(t);
-    return r.status > 0 && r.status < 500; // any non-server-error response = server is up
+    return r.status > 0 && r.status < 500;
   } catch { return false; }
 }

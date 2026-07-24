@@ -23,8 +23,12 @@ export default async function handler(req, res) {
   const alerted = [], recovered = [];
   await Promise.all(recs.map(async (rec, i) => {
     const reachable = reachables[i];
-    const heardRecently = rec.last_heartbeat && (now - rec.last_heartbeat) < HEARTBEAT_GRACE_MS;
-    const alive = reachable || heardRecently;
+    // "Seen recently" = confirmed alive by ANY means within the grace window
+    // (a heartbeat, or a past successful ping). For a site whose inbound ping is
+    // failing, last_seen reflects its last heartbeat — so this vetoes false downs
+    // without depending on the newly-added last_heartbeat field being present.
+    const seenRecently = (now - (rec.last_seen || 0)) < HEARTBEAT_GRACE_MS;
+    const alive = reachable || seenRecently;
 
     if (alive) {
       const wasDown = rec.status === 'down';
@@ -55,11 +59,11 @@ export default async function handler(req, res) {
       await kvSet(`site:${rec.host}`, rec);
       if (goingDown) {
         alerted.push(rec.host);
-        const quietMin = rec.last_heartbeat ? Math.round((now - rec.last_heartbeat) / 60000) : null;
+        const quietMin = Math.round((now - (rec.last_seen || now)) / 60000);
         try {
           await createClickUpTask({
             title: `🔴 Site Down — ${rec.site_name}`,
-            description: `**Site:** ${rec.site_name} (${rec.site_url})\nDirect check failed ${rec.ping_fails}× in a row AND no heartbeat${quietMin ? ` for ~${quietMin} min` : ' on record'}.\n**Last plugin version:** ${rec.plugin_version}`,
+            description: `**Site:** ${rec.site_name} (${rec.site_url})\nDirect check failed ${rec.ping_fails}× in a row AND not seen for ~${quietMin} min.\n**Last plugin version:** ${rec.plugin_version}`,
             tags: [rec.host, 'down'],
           });
         } catch (e) { /* non-fatal */ }

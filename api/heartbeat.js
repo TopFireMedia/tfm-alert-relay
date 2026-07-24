@@ -26,8 +26,11 @@ export default async function handler(req, res) {
     scf_active: Boolean(scf_active),
     // undefined until a site reports it (3.23.0+); keep as tri-state on the dashboard.
     search_indexing: (search_indexing === true || search_indexing === false) ? search_indexing : (prev ? prev.search_indexing : undefined),
-    // A heartbeat is also positive proof the site is up.
-    last_seen: now, last_ping: prev && prev.last_ping ? prev.last_ping : now,
+    // A heartbeat is positive proof the site is up (and outbound, so it isn't
+    // firewall-blocked the way an inbound ping can be). last_heartbeat lets the
+    // monitor veto a false "down" from a blocked/timed-out ping.
+    last_seen: now, last_heartbeat: now,
+    last_ping: prev && prev.last_ping ? prev.last_ping : now,
     status: 'up', down_since: null, ping_fails: 0,
   };
   await kvSet(`site:${host}`, rec);

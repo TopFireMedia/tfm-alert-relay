@@ -8,7 +8,7 @@ export default async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
   body = body || {};
-  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active } = body;
+  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active, search_indexing } = body;
   if (!site_url) return res.status(400).json({ error: 'missing site_url' });
 
   const host = hostOf(site_url);
@@ -24,6 +24,8 @@ export default async function handler(req, res) {
       total_bytes: Number(cs.total_bytes) || 0,
     },
     scf_active: Boolean(scf_active),
+    // undefined until a site reports it (3.23.0+); keep as tri-state on the dashboard.
+    search_indexing: (search_indexing === true || search_indexing === false) ? search_indexing : (prev ? prev.search_indexing : undefined),
     // A heartbeat is also positive proof the site is up.
     last_seen: now, last_ping: prev && prev.last_ping ? prev.last_ping : now,
     status: 'up', down_since: null, ping_fails: 0,

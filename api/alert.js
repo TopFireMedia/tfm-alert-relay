@@ -9,6 +9,14 @@ export default async function handler(req, res) {
   const { site_name, site_url, action, severity, user, user_login, context, ip, timestamp, data } = body;
   if (!action || !site_url) return res.status(400).json({ error: 'Missing required fields (action, site_url)' });
 
+  // Muted actions never create a ClickUp task — too noisy to be useful. Failed
+  // logins in particular are constant automated bot traffic on every WordPress
+  // site. Configurable via the MUTED_ACTIONS env var (comma-separated).
+  const MUTED = new Set(
+    (process.env.MUTED_ACTIONS || 'user_login_failed').split(',').map(s => s.trim()).filter(Boolean)
+  );
+  if (MUTED.has(action)) return res.status(200).json({ ok: true, muted: action });
+
   if (process.env.ALLOWED_DOMAINS) {
     const allowed = process.env.ALLOWED_DOMAINS.split(',').map(d => d.trim().toLowerCase()).filter(Boolean);
     const host = hostOf(site_url).toLowerCase();

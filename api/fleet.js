@@ -85,12 +85,16 @@ export default async function handler(req, res) {
       conCell = `<span class="tag tag-bad" title="Banner is shown but nothing acts on the visitor's choice — no Consent Mode, no script blocking, no iframe blocking">Not enforced</span>`;
     } else {
       const on = [];
+      if (con.system === 'cookie') on.push('legacy Cookie Consent module');
       if (con.consent_mode) on.push('Consent Mode v2');
       if (con.prior_blocking) on.push('script blocking');
       if (con.block_iframes) on.push('iframe blocking');
       if (con.respect_gpc) on.push('GPC');
+      if (con.receipts) on.push('consent receipts');
       if (con.patterns) on.push(`${con.patterns} custom pattern${con.patterns === 1 ? '' : 's'}`);
-      conCell = `<span class="c-ok" title="${esc(on.join(' · '))}">Enforced</span>`;
+      // A site still on the deprecated module is enforcing, but should migrate.
+      const legacy = con.system === 'cookie';
+      conCell = `<span class="${legacy ? 'tag tag-warn' : 'c-ok'}" title="${esc(on.join(' · '))}">${legacy ? 'Legacy' : 'Enforced'}</span>`;
     }
     const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
     const filterKey = esc((name + ' ' + host).toLowerCase());

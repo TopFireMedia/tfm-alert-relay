@@ -21,11 +21,15 @@ export default async function handler(req, res) {
   // apart from "hasn't told us yet".
   const ccIn = cookie_consent && typeof cookie_consent === 'object' ? cookie_consent : null;
   const cookieConsent = ccIn ? {
+    // Which consent system the numbers came from: 'tracking' (current),
+    // 'cookie' (deprecated module) or 'none'.
+    system: ['tracking', 'cookie', 'none'].includes(ccIn.system) ? ccIn.system : 'none',
     banner: Boolean(ccIn.banner),
     consent_mode: Boolean(ccIn.consent_mode),
     prior_blocking: Boolean(ccIn.prior_blocking),
     block_iframes: Boolean(ccIn.block_iframes),
     respect_gpc: Boolean(ccIn.respect_gpc),
+    receipts: Boolean(ccIn.receipts),
     patterns: Number(ccIn.patterns) || 0,
     // Recomputed here rather than trusted, so an older or hand-rolled payload
     // can't report itself as enforcing when it isn't.

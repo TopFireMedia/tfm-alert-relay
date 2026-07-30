@@ -8,7 +8,7 @@ export default async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
   body = body || {};
-  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active, search_indexing } = body;
+  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active, search_indexing, auto_update, update_token_set } = body;
   if (!site_url) return res.status(400).json({ error: 'missing site_url' });
 
   const host = hostOf(site_url);
@@ -26,6 +26,9 @@ export default async function handler(req, res) {
     scf_active: Boolean(scf_active),
     // undefined until a site reports it (3.23.0+); keep as tri-state on the dashboard.
     search_indexing: (search_indexing === true || search_indexing === false) ? search_indexing : (prev ? prev.search_indexing : undefined),
+    // Update health (3.31.0+) — tri-state so old sites show "—" not a false flag.
+    auto_update: (auto_update === true || auto_update === false) ? auto_update : (prev ? prev.auto_update : undefined),
+    update_token_set: (update_token_set === true || update_token_set === false) ? update_token_set : (prev ? prev.update_token_set : undefined),
     // A heartbeat is positive proof the site is up (and outbound, so it isn't
     // firewall-blocked the way an inbound ping can be). last_heartbeat lets the
     // monitor veto a false "down" from a blocked/timed-out ping.

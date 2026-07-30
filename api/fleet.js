@@ -67,6 +67,7 @@ async function render(req, res) {
   const nCustom = rows.filter(hasCustom).length;
   const nScf = rows.filter(hasScf).length;
   const nIndexOff = rows.filter(r => r.search_indexing === false).length;
+  const nUpdIssue = rows.filter(r => r.auto_update === false || r.update_token_set === true).length;
 
   const rowsHtml = rows.map(r => {
     const st = statusOf(r);
@@ -88,9 +89,16 @@ async function render(req, res) {
     const idxCell = idx === false
       ? `<span class="tag tag-bad" title="Search engines discouraged — this site is set to noindex">Off</span>`
       : (idx === true ? `<span class="c-ok">On</span>` : `<span class="c-mut">&mdash;</span>`);
+    const au = r.auto_update, tok = r.update_token_set;
+    const updIssue = au === false || tok === true;
+    const updCell = au === false
+      ? `<span class="tag tag-bad" title="Auto-update is OFF${tok ? ' · a GitHub token is also set' : ''}">Auto off</span>`
+      : (tok === true
+          ? `<span class="tag tag-warn" title="A GitHub token is set — can 401 against the public repo and block update checks">Token set</span>`
+          : (au === true ? `<span class="c-ok">Auto</span>` : `<span class="c-mut">&mdash;</span>`));
     const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
     const filterKey = esc((name + ' ' + host).toLowerCase());
-    return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-filter="${filterKey}">
+    return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-updissue="${updIssue ? '1' : '0'}" data-filter="${filterKey}">
       <td class="c-name">${esc(name)}</td>
       <td><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></td>
       <td>${verCell}</td>
@@ -99,6 +107,7 @@ async function render(req, res) {
       <td>${ccCell}</td>
       <td>${scfCell}</td>
       <td>${idxCell}</td>
+      <td>${updCell}</td>
       <td class="c-mut">${ago(now - (r.last_seen || 0))}</td>
       <td><span class="pill st-${st}"><span class="dot"></span>${label}</span></td>
       <td class="c-act"><button class="rm" onclick="tfmRemove(this)" title="Remove from fleet" aria-label="Remove site">&#10005;</button></td>
@@ -169,6 +178,7 @@ async function render(req, res) {
   .tag-bad{color:var(--down);background:color-mix(in srgb,var(--down) 14%,transparent)}
   .c-ok{color:var(--up);font-weight:600}
   .stat.idx .v{color:var(--down)} .stat.idx.zero .v{color:var(--up)}
+  .stat.upd .v{color:var(--stale)} .stat.upd.zero .v{color:var(--up)}
   .pill{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:.82rem;white-space:nowrap}
   .pill .dot{width:8px;height:8px;border-radius:50%;box-shadow:0 0 0 3px color-mix(in srgb,currentColor 18%,transparent)}
   .st-up{color:var(--up)} .st-stale{color:var(--stale)} .st-down{color:var(--down)}
@@ -194,6 +204,7 @@ async function render(req, res) {
       <label class="toggle"><input type="checkbox" id="cconly"> Custom code</label>
       <label class="toggle"><input type="checkbox" id="scfonly"> SCF active</label>
       <label class="toggle"><input type="checkbox" id="idxoff"> Indexing off</label>
+      <label class="toggle"><input type="checkbox" id="updonly"> Update issues</label>
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
     </div>
   </header>
@@ -206,12 +217,13 @@ async function render(req, res) {
     <div class="stat cc ${nCustom ? '' : 'zero'}"><div class="k">Custom code</div><div class="v" id="stat-cc">${nCustom}<small>to migrate to Elementor</small></div></div>
     <div class="stat scf ${nScf ? '' : 'zero'}"><div class="k">SCF active</div><div class="v" id="stat-scf">${nScf}<small>can be removed elsewhere</small></div></div>
     <div class="stat idx ${nIndexOff ? '' : 'zero'}"><div class="k">Indexing off</div><div class="v" id="stat-idx">${nIndexOff}<small>check live sites</small></div></div>
+    <div class="stat upd ${nUpdIssue ? '' : 'zero'}"><div class="k">Update issues</div><div class="v" id="stat-upd">${nUpdIssue}<small>auto-update off / token set</small></div></div>
   </div>
 
   <div class="card"><div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Site</th><th>Admin</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Custom code</th><th>SCF</th><th>Index</th><th>Last seen</th><th>Status</th><th></th>
+        <th>Site</th><th>Admin</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Custom code</th><th>SCF</th><th>Index</th><th>Updates</th><th>Last seen</th><th>Status</th><th></th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>
@@ -227,17 +239,18 @@ async function render(req, res) {
   function num(id,n){ var el=document.getElementById(id); if(el) el.firstChild.nodeValue=String(n); }
   function recount(){
     var trs = document.querySelectorAll('tbody tr[data-host]');
-    var up=0, attn=0, custom=0, scf=0, idxoff=0, vers={};
+    var up=0, attn=0, custom=0, scf=0, idxoff=0, updissue=0, vers={};
     trs.forEach(function(tr){
       var s=tr.getAttribute('data-status');
       if(s==='up') up++; else attn++;
       if(tr.getAttribute('data-custom')==='1') custom++;
       if(tr.getAttribute('data-scf')==='1') scf++;
       if(tr.getAttribute('data-index')==='1') idxoff++;
+      if(tr.getAttribute('data-updissue')==='1') updissue++;
       var v=tr.getAttribute('data-ver'); if(v) vers[v]=1;
     });
     num('stat-total', trs.length); num('stat-up', up); num('stat-attn', attn);
-    num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf); num('stat-idx', idxoff);
+    num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf); num('stat-idx', idxoff); num('stat-upd', updissue);
     var empty=document.getElementById('empty');
     if(empty) empty.style.display = trs.length ? 'none' : 'block';
   }
@@ -255,17 +268,20 @@ async function render(req, res) {
     var ccOnly = document.getElementById('cconly').checked;
     var scfOnly = document.getElementById('scfonly').checked;
     var idxOnly = document.getElementById('idxoff').checked;
+    var updOnly = document.getElementById('updonly').checked;
     document.querySelectorAll('tbody tr[data-host]').forEach(function(tr){
       var matchText = !v || tr.getAttribute('data-filter').indexOf(v) > -1;
       var matchCc = !ccOnly || tr.getAttribute('data-custom') === '1';
       var matchScf = !scfOnly || tr.getAttribute('data-scf') === '1';
       var matchIdx = !idxOnly || tr.getAttribute('data-index') === '1';
-      tr.style.display = (matchText && matchCc && matchScf && matchIdx) ? '' : 'none';
+      var matchUpd = !updOnly || tr.getAttribute('data-updissue') === '1';
+      tr.style.display = (matchText && matchCc && matchScf && matchIdx && matchUpd) ? '' : 'none';
     });
   }
   document.getElementById('q').addEventListener('input', applyFilter);
   document.getElementById('cconly').addEventListener('change', applyFilter);
   document.getElementById('scfonly').addEventListener('change', applyFilter);
+  document.getElementById('updonly').addEventListener('change', applyFilter);
   document.getElementById('idxoff').addEventListener('change', applyFilter);
   // 5 minutes, not 1. Sites heartbeat every 10 minutes, so a 60s refresh showed
   // nothing new 4 times out of 5 while costing a full round of KV reads.

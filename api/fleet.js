@@ -45,6 +45,13 @@ export default async function handler(req, res) {
   const nCustom = rows.filter(hasCustom).length;
   const nScf = rows.filter(hasScf).length;
   const nIndexOff = rows.filter(r => r.search_indexing === false).length;
+  // A banner that is shown but backed by no enforcement asks the visitor for a
+  // choice the site does not act on. That is the state to chase down, so it gets
+  // the stat and the filter rather than a plain "has consent" count.
+  const consentOf = (r) => (r.cookie_consent && typeof r.cookie_consent === 'object') ? r.cookie_consent : null;
+  const consentGap = (r) => { const c = consentOf(r); return !!(c && c.banner && !c.enforcing); };
+  const nConsentGap = rows.filter(consentGap).length;
+  const nConsentOn = rows.filter(r => { const c = consentOf(r); return !!(c && c.banner); }).length;
 
   const rowsHtml = rows.map(r => {
     const st = statusOf(r);
@@ -66,9 +73,28 @@ export default async function handler(req, res) {
     const idxCell = idx === false
       ? `<span class="tag tag-bad" title="Search engines discouraged — this site is set to noindex">Off</span>`
       : (idx === true ? `<span class="c-ok">On</span>` : `<span class="c-mut">&mdash;</span>`);
+    // Cookie consent: not reporting / banner off / banner but nothing enforcing
+    // it / properly enforced.
+    const con = consentOf(r);
+    let conCell;
+    if (!con) {
+      conCell = `<span class="c-mut" title="Not reported — site is on a plugin version older than 3.26.0">&mdash;</span>`;
+    } else if (!con.banner) {
+      conCell = `<span class="c-mut" title="No consent banner on this site">Off</span>`;
+    } else if (!con.enforcing) {
+      conCell = `<span class="tag tag-bad" title="Banner is shown but nothing acts on the visitor's choice — no Consent Mode, no script blocking, no iframe blocking">Not enforced</span>`;
+    } else {
+      const on = [];
+      if (con.consent_mode) on.push('Consent Mode v2');
+      if (con.prior_blocking) on.push('script blocking');
+      if (con.block_iframes) on.push('iframe blocking');
+      if (con.respect_gpc) on.push('GPC');
+      if (con.patterns) on.push(`${con.patterns} custom pattern${con.patterns === 1 ? '' : 's'}`);
+      conCell = `<span class="c-ok" title="${esc(on.join(' · '))}">Enforced</span>`;
+    }
     const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
     const filterKey = esc((name + ' ' + host).toLowerCase());
-    return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-filter="${filterKey}">
+    return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-consent="${consentGap(r) ? '1' : '0'}" data-filter="${filterKey}">
       <td class="c-name">${esc(name)}</td>
       <td><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></td>
       <td>${verCell}</td>
@@ -77,6 +103,7 @@ export default async function handler(req, res) {
       <td>${ccCell}</td>
       <td>${scfCell}</td>
       <td>${idxCell}</td>
+      <td>${conCell}</td>
       <td class="c-mut">${ago(now - (r.last_seen || 0))}</td>
       <td><span class="pill st-${st}"><span class="dot"></span>${label}</span></td>
       <td class="c-act"><button class="rm" onclick="tfmRemove(this)" title="Remove from fleet" aria-label="Remove site">&#10005;</button></td>
@@ -147,6 +174,7 @@ export default async function handler(req, res) {
   .tag-bad{color:var(--down);background:color-mix(in srgb,var(--down) 14%,transparent)}
   .c-ok{color:var(--up);font-weight:600}
   .stat.idx .v{color:var(--down)} .stat.idx.zero .v{color:var(--up)}
+  .stat.con .v{color:var(--down)} .stat.con.zero .v{color:var(--up)}
   .pill{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:.82rem;white-space:nowrap}
   .pill .dot{width:8px;height:8px;border-radius:50%;box-shadow:0 0 0 3px color-mix(in srgb,currentColor 18%,transparent)}
   .st-up{color:var(--up)} .st-stale{color:var(--stale)} .st-down{color:var(--down)}
@@ -172,6 +200,7 @@ export default async function handler(req, res) {
       <label class="toggle"><input type="checkbox" id="cconly"> Custom code</label>
       <label class="toggle"><input type="checkbox" id="scfonly"> SCF active</label>
       <label class="toggle"><input type="checkbox" id="idxoff"> Indexing off</label>
+      <label class="toggle"><input type="checkbox" id="congap"> Consent not enforced</label>
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
     </div>
   </header>
@@ -184,12 +213,13 @@ export default async function handler(req, res) {
     <div class="stat cc ${nCustom ? '' : 'zero'}"><div class="k">Custom code</div><div class="v" id="stat-cc">${nCustom}<small>to migrate to Elementor</small></div></div>
     <div class="stat scf ${nScf ? '' : 'zero'}"><div class="k">SCF active</div><div class="v" id="stat-scf">${nScf}<small>can be removed elsewhere</small></div></div>
     <div class="stat idx ${nIndexOff ? '' : 'zero'}"><div class="k">Indexing off</div><div class="v" id="stat-idx">${nIndexOff}<small>check live sites</small></div></div>
+    <div class="stat con ${nConsentGap ? '' : 'zero'}"><div class="k">Consent not enforced</div><div class="v" id="stat-con">${nConsentGap}<small>of ${nConsentOn} with a banner</small></div></div>
   </div>
 
   <div class="card"><div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Site</th><th>Admin</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Custom code</th><th>SCF</th><th>Index</th><th>Last seen</th><th>Status</th><th></th>
+        <th>Site</th><th>Admin</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Custom code</th><th>SCF</th><th>Index</th><th>Consent</th><th>Last seen</th><th>Status</th><th></th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>
@@ -205,17 +235,19 @@ export default async function handler(req, res) {
   function num(id,n){ var el=document.getElementById(id); if(el) el.firstChild.nodeValue=String(n); }
   function recount(){
     var trs = document.querySelectorAll('tbody tr[data-host]');
-    var up=0, attn=0, custom=0, scf=0, idxoff=0, vers={};
+    var up=0, attn=0, custom=0, scf=0, idxoff=0, congap=0, vers={};
     trs.forEach(function(tr){
       var s=tr.getAttribute('data-status');
       if(s==='up') up++; else attn++;
       if(tr.getAttribute('data-custom')==='1') custom++;
       if(tr.getAttribute('data-scf')==='1') scf++;
       if(tr.getAttribute('data-index')==='1') idxoff++;
+      if(tr.getAttribute('data-consent')==='1') congap++;
       var v=tr.getAttribute('data-ver'); if(v) vers[v]=1;
     });
     num('stat-total', trs.length); num('stat-up', up); num('stat-attn', attn);
     num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf); num('stat-idx', idxoff);
+    num('stat-con', congap);
     var empty=document.getElementById('empty');
     if(empty) empty.style.display = trs.length ? 'none' : 'block';
   }
@@ -233,18 +265,21 @@ export default async function handler(req, res) {
     var ccOnly = document.getElementById('cconly').checked;
     var scfOnly = document.getElementById('scfonly').checked;
     var idxOnly = document.getElementById('idxoff').checked;
+    var conOnly = document.getElementById('congap').checked;
     document.querySelectorAll('tbody tr[data-host]').forEach(function(tr){
       var matchText = !v || tr.getAttribute('data-filter').indexOf(v) > -1;
       var matchCc = !ccOnly || tr.getAttribute('data-custom') === '1';
       var matchScf = !scfOnly || tr.getAttribute('data-scf') === '1';
       var matchIdx = !idxOnly || tr.getAttribute('data-index') === '1';
-      tr.style.display = (matchText && matchCc && matchScf && matchIdx) ? '' : 'none';
+      var matchCon = !conOnly || tr.getAttribute('data-consent') === '1';
+      tr.style.display = (matchText && matchCc && matchScf && matchIdx && matchCon) ? '' : 'none';
     });
   }
   document.getElementById('q').addEventListener('input', applyFilter);
   document.getElementById('cconly').addEventListener('change', applyFilter);
   document.getElementById('scfonly').addEventListener('change', applyFilter);
   document.getElementById('idxoff').addEventListener('change', applyFilter);
+  document.getElementById('congap').addEventListener('change', applyFilter);
   setTimeout(function(){ location.reload(); }, 60000);
 })();
 </script>

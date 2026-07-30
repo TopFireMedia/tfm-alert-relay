@@ -8,7 +8,12 @@ import { createClickUpTask } from '../lib/clickup.js';
 // the ping is only ever a POSITIVE signal that refreshes freshness. This makes
 // false downs essentially impossible while still catching genuinely dead sites.
 const DOWN_AFTER_MS = 45 * 60 * 1000;      // no contact (heartbeat or good ping) for this long => down
-const FRESH_WRITE_MS = 10 * 60 * 1000;     // on a good ping, only re-write last_seen if older than this (saves KV writes)
+// On a good ping, only re-write last_seen if it's older than this. Sites already
+// refresh it themselves every ~10 min via the heartbeat, so the ping-write is
+// mostly redundant — it only matters for a site whose outbound heartbeat is
+// blocked. 30 min keeps that safety net well inside DOWN_AFTER_MS while cutting
+// monitor writes to a third.
+const FRESH_WRITE_MS = 30 * 60 * 1000;
 const RECOVER_NOTIFY_MS = 15 * 60 * 1000;  // only send a "recovered" alert if it was actually down this long (suppresses flap/false-down noise)
 const PING_TIMEOUT_MS = 4000;              // short + best-effort; aborted pings are harmless
 

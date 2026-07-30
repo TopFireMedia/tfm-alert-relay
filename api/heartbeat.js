@@ -34,7 +34,13 @@ export default async function handler(req, res) {
     status: 'up', down_since: null, ping_fails: 0,
   };
   await kvSet(`site:${host}`, rec);
-  await kvSAdd('sites', host);
+  // Only add to the set the first time we hear from a site. SADD on every
+  // heartbeat was a third of all heartbeat commands and a no-op after the first
+  // one. `prev` being null is the reliable signal for "we've not seen this
+  // host before" — the record and the set membership are written together.
+  if (!prev) {
+    await kvSAdd('sites', host);
+  }
 
   // Recovery: it was flagged down and just checked in again.
   if (prev && prev.status === 'down') {

@@ -1,6 +1,26 @@
-import { kvGet, kvSMembers, kvConfigured, kvDel, kvSRem } from '../lib/kv.js';
+import { kvMGet, kvSMembers, kvConfigured, kvDel, kvSRem } from '../lib/kv.js';
 
 export default async function handler(req, res) {
+  try {
+    return await render(req, res);
+  } catch (err) {
+    // A KV failure used to take the whole dashboard down with an opaque Vercel
+    // 500. Show what actually went wrong instead — the message from lib/kv.js
+    // carries Upstash's own status and response.
+    const msg = (err && err.message) ? err.message : String(err);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(503).send(
+      `<!doctype html><meta charset="utf-8"><title>TFM Fleet Monitor — unavailable</title>` +
+      `<div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:44rem;margin:12vh auto;padding:0 1.5rem">` +
+      `<h1 style="font-size:1.2rem">Monitoring data is unavailable</h1>` +
+      `<p>The dashboard could not read from its datastore. The fleet itself is unaffected — sites keep sending heartbeats, and this page will recover on its own once the datastore does.</p>` +
+      `<pre style="background:#f5f6f8;padding:.85rem 1rem;border-radius:8px;overflow-x:auto;font-size:.85rem">${esc(msg)}</pre>` +
+      `<p style="color:#6b7280;font-size:.9rem">A <code>KV 4xx</code> above usually means the Upstash plan limit has been reached or the credentials changed.</p></div>`
+    );
+  }
+}
+
+async function render(req, res) {
   const token = process.env.DASHBOARD_TOKEN || '';
   const key = req.query.key || '';
   if (token && key !== token) return res.status(401).send('Unauthorized — append ?key=YOUR_TOKEN');
@@ -22,8 +42,10 @@ export default async function handler(req, res) {
 
   const hosts = await kvSMembers('sites');
   const now = Date.now();
-  const rows = [];
-  for (const host of hosts) { const r = await kvGet(`site:${host}`); if (r) rows.push(r); }
+  // One MGET rather than a GET per host. At ~33 sites this is 2 KV commands per
+  // page load instead of 34 — and since the page auto-refreshes, a single
+  // dashboard left open was the largest consumer of the Upstash command budget.
+  const rows = (hosts.length ? await kvMGet(hosts.map(h => `site:${h}`)) : []).filter(Boolean);
   rows.sort((a, b) => (decodeEntities(a.site_name) || '').localeCompare(decodeEntities(b.site_name) || ''));
 
   if (req.query.format === 'json') {
@@ -196,7 +218,7 @@ export default async function handler(req, res) {
     <div id="empty" style="display:${rows.length ? 'none' : 'block'}">No sites have checked in yet.</div>
   </div></div>
 
-  <div class="foot"><span class="live"></span> Live &middot; status by direct ping &middot; auto-refreshes every 60s</div>
+  <div class="foot"><span class="live"></span> Live &middot; status by direct ping &middot; auto-refreshes every 5 min</div>
 </div>
 <script>
 (function(){
@@ -245,7 +267,9 @@ export default async function handler(req, res) {
   document.getElementById('cconly').addEventListener('change', applyFilter);
   document.getElementById('scfonly').addEventListener('change', applyFilter);
   document.getElementById('idxoff').addEventListener('change', applyFilter);
-  setTimeout(function(){ location.reload(); }, 60000);
+  // 5 minutes, not 1. Sites heartbeat every 10 minutes, so a 60s refresh showed
+  // nothing new 4 times out of 5 while costing a full round of KV reads.
+  setTimeout(function(){ location.reload(); }, 300000);
 })();
 </script>
 </body></html>`;

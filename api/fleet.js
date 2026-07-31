@@ -20,7 +20,22 @@ export default async function handler(req, res) {
 async function render(req, res) {
   const token = process.env.DASHBOARD_TOKEN || '';
   const key = req.query.key || '';
-  if (token && key !== token) return res.status(401).send('Unauthorized — append ?key=YOUR_TOKEN');
+  if (token) {
+    const cookieTok = getCookie(req, 'tfm_dash');
+    if (key === token) {
+      // Fresh auth via ?key — stash it in an HttpOnly cookie so the token stops
+      // living in the address bar, browser history, and outbound referrers, then
+      // strip it from the URL. API/remove calls just proceed.
+      res.setHeader('Set-Cookie', `tfm_dash=${encodeURIComponent(token)}; Path=/api; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`);
+      if (!req.query.remove && req.query.format !== 'json') {
+        res.statusCode = 302;
+        res.setHeader('Location', '/api/fleet');
+        return res.end();
+      }
+    } else if (cookieTok !== token) {
+      return res.status(401).send('Unauthorized — append ?key=YOUR_TOKEN');
+    }
+  }
   if (!kvConfigured()) return res.status(500).send('KV not configured');
 
   if (req.query.remove) {
@@ -307,7 +322,7 @@ async function render(req, res) {
     var tr = btn.closest('tr'); var host = tr.getAttribute('data-host');
     if(!confirm('Remove ' + host + ' from the fleet?\\nIt returns automatically if that site sends another heartbeat.')) return;
     btn.disabled = true; btn.classList.add('busy');
-    fetch('?remove=' + encodeURIComponent(host) + '&key=' + encodeURIComponent(key) + '&format=json')
+    fetch('?remove=' + encodeURIComponent(host) + (key ? '&key=' + encodeURIComponent(key) : '') + '&format=json', { credentials: 'same-origin' })
       .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function(){ tr.classList.add('removing'); setTimeout(function(){ tr.remove(); recount(); }, 300); })
       .catch(function(){ btn.disabled=false; btn.classList.remove('busy'); alert('Could not remove ' + host + '. Please try again.'); });
@@ -349,6 +364,15 @@ async function render(req, res) {
   return res.status(200).send(html);
 }
 
+function getCookie(req, name){
+  const raw = (req.headers && req.headers.cookie) || '';
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return '';
+}
 function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function decodeEntities(s){
   return String(s ?? '')

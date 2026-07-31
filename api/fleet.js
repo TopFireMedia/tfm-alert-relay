@@ -4,9 +4,6 @@ export default async function handler(req, res) {
   try {
     return await render(req, res);
   } catch (err) {
-    // A KV failure used to take the whole dashboard down with an opaque Vercel
-    // 500. Show what actually went wrong instead — the message from lib/kv.js
-    // carries Upstash's own status and response.
     const msg = (err && err.message) ? err.message : String(err);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(503).send(
@@ -26,7 +23,6 @@ async function render(req, res) {
   if (token && key !== token) return res.status(401).send('Unauthorized — append ?key=YOUR_TOKEN');
   if (!kvConfigured()) return res.status(500).send('KV not configured');
 
-  // Remove a site (called via fetch from the dashboard, or as a direct link).
   if (req.query.remove) {
     const host = String(req.query.remove).toLowerCase();
     await kvDel(`site:${host}`);
@@ -42,9 +38,6 @@ async function render(req, res) {
 
   const hosts = await kvSMembers('sites');
   const now = Date.now();
-  // One MGET rather than a GET per host. At ~33 sites this is 2 KV commands per
-  // page load instead of 34 — and since the page auto-refreshes, a single
-  // dashboard left open was the largest consumer of the Upstash command budget.
   const rows = (hosts.length ? await kvMGet(hosts.map(h => `site:${h}`)) : []).filter(Boolean);
   rows.sort((a, b) => (decodeEntities(a.site_name) || '').localeCompare(decodeEntities(b.site_name) || ''));
 
@@ -57,8 +50,11 @@ async function render(req, res) {
   const statusOf = (r) => (r.status === 'down' ? 'down' : ((now - (r.last_seen || 0)) > STALE ? 'stale' : 'up'));
   const hasCustom = (r) => !!(r.custom_scripts && (r.custom_scripts.head || r.custom_scripts.footer));
   const hasScf = (r) => !!r.scf_active;
+  const sslSoon = (r) => typeof r.ssl_days_left === 'number' && r.ssl_days_left < 30;
   const versions = rows.map(r => r.plugin_version).filter(Boolean);
   const latest = versions.slice().sort(cmpVer).pop() || '';
+  const nDev = rows.filter(r => isDev(hostOf(r.site_url))).length;
+  const nClient = rows.length - nDev;
   const nUp = rows.filter(r => statusOf(r) === 'up').length;
   const nDown = rows.filter(r => statusOf(r) === 'down').length;
   const nStale = rows.filter(r => statusOf(r) === 'stale').length;
@@ -68,15 +64,29 @@ async function render(req, res) {
   const nScf = rows.filter(hasScf).length;
   const nIndexOff = rows.filter(r => r.search_indexing === false).length;
   const nUpdIssue = rows.filter(r => r.auto_update === false || r.update_token_set === true).length;
+  const nSsl = rows.filter(sslSoon).length;
 
   const rowsHtml = rows.map(r => {
     const st = statusOf(r);
     const label = st === 'down' ? 'Down' : (st === 'stale' ? 'Stale' : 'Up');
     const host = hostOf(r.site_url);
+    const dev = isDev(host);
     const name = decodeEntities(r.site_name);
     const outdated = r.plugin_version && latest && cmpVer(r.plugin_version, latest) < 0;
     const ver = esc(r.plugin_version || '—');
     const verCell = `<span class="ver ${outdated ? 'ver-old' : 'ver-cur'}"${outdated ? ` title="Behind latest (${esc(latest)})"` : ''}>${ver}${outdated ? ' &#9650;' : ''}</span>`;
+
+    const eol = phpEol(r.php_version);
+    const stackCell = `<span class="${eol ? 'php-eol' : 'c-mut'}"${eol ? ` title="PHP ${esc(r.php_version)} is end-of-life — upgrade the server PHP"` : ''}>${esc(r.php_version || '—')}</span><span class="c-faint"> / ${esc(r.wp_version || '—')}</span>`;
+
+    const sd = r.ssl_days_left;
+    const sslCell = (typeof sd === 'number')
+      ? (sd < 0 ? `<span class="tag tag-bad" title="Certificate EXPIRED ${-sd} day(s) ago">Expired</span>`
+        : sd < 15 ? `<span class="tag tag-bad" title="Certificate expires in ${sd} day(s)">${sd}d</span>`
+        : sd < 30 ? `<span class="tag tag-warn" title="Certificate expires in ${sd} day(s)">${sd}d</span>`
+        : `<span class="c-mut" title="Certificate valid for ${sd} more day(s)">${sd}d</span>`)
+      : `<span class="c-mut">&mdash;</span>`;
+
     const cc = hasCustom(r);
     const ccCell = cc
       ? `<span class="tag tag-warn" title="Head: ${r.custom_scripts.head ? 'yes' : 'no'} · Footer: ${r.custom_scripts.footer ? 'yes' : 'no'}">Yes · ${fmtBytes(r.custom_scripts.total_bytes || 0)}</span>`
@@ -89,6 +99,17 @@ async function render(req, res) {
     const idxCell = idx === false
       ? `<span class="tag tag-bad" title="Search engines discouraged — this site is set to noindex">Off</span>`
       : (idx === true ? `<span class="c-ok">On</span>` : `<span class="c-mut">&mdash;</span>`);
+
+    const cons = (r.cookie_consent && typeof r.cookie_consent === 'object') ? r.cookie_consent : null;
+    const csys = cons ? cons.system : undefined;
+    const consentCell = (csys === undefined)
+      ? `<span class="c-mut">&mdash;</span>`
+      : (csys === 'tracking'
+          ? (cons.enforcing
+              ? `<span class="tag tag-info" title="Tracking Consent active and enforcing the visitor's choice">Tracking</span>`
+              : `<span class="tag tag-warn" title="A consent banner is shown but nothing enforces the choice">Banner only</span>`)
+          : `<span class="c-mut" title="No consent banner on this site">Off</span>`);
+
     const au = r.auto_update, tok = r.update_token_set;
     const updIssue = au === false || tok === true;
     const updCell = au === false
@@ -96,16 +117,18 @@ async function render(req, res) {
       : (tok === true
           ? `<span class="tag tag-warn" title="A GitHub token is set — can 401 against the public repo and block update checks">Token set</span>`
           : (au === true ? `<span class="c-ok">Auto</span>` : `<span class="c-mut">&mdash;</span>`));
+
     const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
     const filterKey = esc((name + ' ' + host).toLowerCase());
-    return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-updissue="${updIssue ? '1' : '0'}" data-filter="${filterKey}">
-      <td class="c-name">${esc(name)}<div class="c-sub"><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></div></td>
+    return `<tr data-host="${esc(host)}" data-type="${dev ? 'dev' : 'client'}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-updissue="${updIssue ? '1' : '0'}" data-ssl="${sslSoon(r) ? '1' : '0'}" data-filter="${filterKey}">
+      <td class="c-name">${esc(name)}${dev ? ' <span class="ptag ptag-dev" title="Development / staging site (tfmstaging.com)">dev</span>' : ''}<div class="c-sub"><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></div></td>
       <td>${verCell}</td>
-      <td class="c-mut">${esc(r.php_version || '—')}</td>
-      <td class="c-mut">${esc(r.wp_version || '—')}</td>
+      <td class="c-mut">${stackCell}</td>
+      <td>${sslCell}</td>
       <td>${ccCell}</td>
       <td>${scfCell}</td>
       <td>${idxCell}</td>
+      <td>${consentCell}</td>
       <td>${updCell}</td>
       <td class="c-mut">${ago(now - (r.last_seen || 0))}</td>
       <td><span class="pill st-${st}"><span class="dot"></span>${label}</span></td>
@@ -130,8 +153,8 @@ async function render(req, res) {
   body{margin:0;background:var(--bg);color:var(--ink);
     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased}
-  .wrap{max-width:1320px;margin:0 auto;padding:28px 20px 56px}
-  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+  .wrap{max-width:1360px;margin:0 auto;padding:28px 20px 56px}
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
   .brand{display:flex;align-items:center;gap:12px;flex:1;min-width:220px}
   .mark{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;font-size:22px;
     background:linear-gradient(135deg,var(--accentA),var(--accentB));box-shadow:var(--shadow)}
@@ -139,14 +162,19 @@ async function render(req, res) {
   .sub{color:var(--mut);font-size:.85rem;margin-top:1px}
   .tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .search{background:var(--card);border:1px solid var(--line);color:var(--ink);
-    padding:.5rem .75rem;border-radius:9px;font-size:.9rem;min-width:180px;outline:none}
+    padding:.5rem .75rem;border-radius:9px;font-size:.9rem;min-width:170px;outline:none}
   .search:focus{border-color:var(--accentB)}
   .toggle{display:flex;align-items:center;gap:6px;font-size:.85rem;color:var(--mut);
     background:var(--card);border:1px solid var(--line);padding:.45rem .7rem;border-radius:9px;cursor:pointer;user-select:none}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--card)}
+  .seg-btn{border:0;background:transparent;color:var(--mut);padding:.45rem .75rem;font-size:.85rem;cursor:pointer;font-weight:600}
+  .seg-btn+.seg-btn{border-left:1px solid var(--line)}
+  .seg-btn.active{background:color-mix(in srgb,var(--accentB) 13%,transparent);color:var(--ink)}
   .btn{background:var(--card);border:1px solid var(--line);color:var(--ink);
     padding:.5rem .8rem;border-radius:9px;font-size:.9rem;cursor:pointer;font-weight:500}
   .btn:hover{border-color:var(--accentB);color:var(--accentB)}
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px}
+  .segbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:12px;margin-bottom:20px}
   .stat{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:15px 16px;box-shadow:var(--shadow)}
   .stat .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);font-weight:600}
   .stat .v{font-size:1.85rem;font-weight:700;margin-top:4px;line-height:1;display:flex;align-items:baseline;gap:8px}
@@ -154,13 +182,16 @@ async function render(req, res) {
   .stat.up .v{color:var(--up)} .stat.attn .v{color:var(--stale)} .stat.attn.zero .v{color:var(--ink)}
   .stat.cc .v{color:var(--stale)} .stat.cc.zero .v{color:var(--up)}
   .stat.scf .v{color:var(--info)} .stat.scf.zero .v{color:var(--up)}
+  .stat.idx .v{color:var(--down)} .stat.idx.zero .v{color:var(--up)}
+  .stat.upd .v{color:var(--stale)} .stat.upd.zero .v{color:var(--up)}
+  .stat.ssl .v{color:var(--down)} .stat.ssl.zero .v{color:var(--up)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
   .table-wrap{overflow-x:auto}
   table{border-collapse:collapse;width:100%;font-size:.9rem}
-  thead th{position:sticky;top:0;background:var(--card);text-align:left;padding:.6rem .6rem;cursor:help;
-    font-size:.7rem;text-transform:uppercase;letter-spacing:.045em;color:var(--mut);
+  thead th{position:sticky;top:0;background:var(--card);text-align:left;padding:.6rem .55rem;cursor:help;
+    font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);
     font-weight:600;border-bottom:1px solid var(--line);white-space:nowrap}
-  tbody td{padding:.55rem .6rem;border-bottom:1px solid var(--line);vertical-align:middle}
+  tbody td{padding:.55rem .55rem;border-bottom:1px solid var(--line);vertical-align:middle}
   tbody tr:last-child td{border-bottom:0}
   tbody tr{transition:background .12s,opacity .28s,transform .28s}
   tbody tr:hover{background:color-mix(in srgb,var(--accentB) 5%,transparent)}
@@ -168,7 +199,11 @@ async function render(req, res) {
   .c-name{font-weight:600;line-height:1.25}
   .c-sub{margin-top:2px;font-size:.8rem;font-weight:400}
   .c-dom{color:var(--mut);text-decoration:none} .c-dom:hover{color:var(--accentB);text-decoration:underline}
-  .c-mut{color:var(--mut);white-space:nowrap}
+  .c-mut{color:var(--mut);white-space:nowrap} .c-faint{color:var(--mut);opacity:.75}
+  .php-eol{color:var(--down);font-weight:600}
+  .ptag{display:inline-block;font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+    padding:.05rem .3rem;border-radius:4px;vertical-align:middle;margin-left:5px}
+  .ptag-dev{color:var(--info);background:color-mix(in srgb,var(--info) 15%,transparent)}
   .ver{display:inline-block;font:600 .78rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;
     padding:.28rem .5rem;border-radius:6px;background:color-mix(in srgb,var(--ink) 7%,transparent)}
   .ver-old{background:color-mix(in srgb,var(--stale) 18%,transparent);color:var(--stale)}
@@ -177,8 +212,6 @@ async function render(req, res) {
   .tag-info{color:var(--info);background:color-mix(in srgb,var(--info) 14%,transparent)}
   .tag-bad{color:var(--down);background:color-mix(in srgb,var(--down) 14%,transparent)}
   .c-ok{color:var(--up);font-weight:600}
-  .stat.idx .v{color:var(--down)} .stat.idx.zero .v{color:var(--up)}
-  .stat.upd .v{color:var(--stale)} .stat.upd.zero .v{color:var(--up)}
   .pill{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:.82rem;white-space:nowrap}
   .pill .dot{width:8px;height:8px;border-radius:50%;box-shadow:0 0 0 3px color-mix(in srgb,currentColor 18%,transparent)}
   .st-up{color:var(--up)} .st-stale{color:var(--stale)} .st-down{color:var(--down)}
@@ -205,54 +238,70 @@ async function render(req, res) {
       <label class="toggle"><input type="checkbox" id="scfonly"> SCF active</label>
       <label class="toggle"><input type="checkbox" id="idxoff"> Indexing off</label>
       <label class="toggle"><input type="checkbox" id="updonly"> Update issues</label>
+      <label class="toggle"><input type="checkbox" id="sslsoon"> SSL &lt;30d</label>
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
     </div>
   </header>
+
+  <div class="segbar">
+    <div class="seg" id="seg">
+      <button class="seg-btn active" data-seg="all">All &middot; ${rows.length}</button>
+      <button class="seg-btn" data-seg="client">Clients &middot; ${nClient}</button>
+      <button class="seg-btn" data-seg="dev">Dev &middot; ${nDev}</button>
+    </div>
+    <span class="sub" id="segnote">Dev = tfmstaging.com subdomains &middot; Clients = live domains</span>
+  </div>
 
   <div class="stats">
     <div class="stat"><div class="k">Sites</div><div class="v" id="stat-total">${rows.length}</div></div>
     <div class="stat up"><div class="k">Up</div><div class="v" id="stat-up">${nUp}</div></div>
     <div class="stat attn ${(nDown + nStale) ? '' : 'zero'}"><div class="k">Needs attention</div><div class="v" id="stat-attn">${nDown + nStale}<small>${nDown} down &middot; ${nStale} stale</small></div></div>
     <div class="stat"><div class="k">Plugin versions</div><div class="v" id="stat-ver">${nVer}<small>${nOutdated} behind latest</small></div></div>
-    <div class="stat cc ${nCustom ? '' : 'zero'}"><div class="k">Custom code</div><div class="v" id="stat-cc">${nCustom}<small>to migrate to Elementor</small></div></div>
-    <div class="stat scf ${nScf ? '' : 'zero'}"><div class="k">SCF active</div><div class="v" id="stat-scf">${nScf}<small>can be removed elsewhere</small></div></div>
+    <div class="stat ssl ${nSsl ? '' : 'zero'}"><div class="k">SSL &lt; 30 days</div><div class="v" id="stat-ssl">${nSsl}<small>renew certs</small></div></div>
+    <div class="stat cc ${nCustom ? '' : 'zero'}"><div class="k">Custom code</div><div class="v" id="stat-cc">${nCustom}<small>migrate to Elementor</small></div></div>
+    <div class="stat scf ${nScf ? '' : 'zero'}"><div class="k">SCF active</div><div class="v" id="stat-scf">${nScf}<small>removable</small></div></div>
     <div class="stat idx ${nIndexOff ? '' : 'zero'}"><div class="k">Indexing off</div><div class="v" id="stat-idx">${nIndexOff}<small>check live sites</small></div></div>
-    <div class="stat upd ${nUpdIssue ? '' : 'zero'}"><div class="k">Update issues</div><div class="v" id="stat-upd">${nUpdIssue}<small>auto-update off / token set</small></div></div>
+    <div class="stat upd ${nUpdIssue ? '' : 'zero'}"><div class="k">Update issues</div><div class="v" id="stat-upd">${nUpdIssue}<small>off / token</small></div></div>
   </div>
 
   <div class="card"><div class="table-wrap">
     <table>
       <thead><tr>
-        <th title="Site name. The domain beneath it links straight to that site's WordPress admin login.">Site</th><th title="Installed TFM Custom Functions version. A ▲ means the site is behind the latest release.">Plugin</th><th title="PHP version running on the server.">PHP</th><th title="WordPress core version.">WP</th><th title="Deprecated head/footer custom scripts found on the site (with total size). Move these into Elementor → Custom Code, then remove them here.">Custom code</th><th title="Secure Custom Fields / ACF plugin active. Only Press Releases used it, and that's now optional — so 'Active' means SCF can be removed if nothing else on the site needs it.">SCF</th><th title="Search-engine indexing (WordPress → Settings → Reading → 'Discourage search engines'). On = indexable; Off = noindex, which is a problem on a live production site.">Index</th><th title="Update health. Auto = self-updating normally; Auto off = auto-update disabled; Token set = a leftover GitHub token that can block update checks. '—' means the site isn't reporting this yet.">Updates</th><th title="How long since the site was last confirmed alive — by its heartbeat or a successful ping.">Last seen</th><th title="Up or Down, decided by pinging the site directly. Only marked down after ~45 minutes with no contact of any kind.">Status</th><th></th>
+        <th title="Site name; a 'dev' tag marks tfmstaging.com staging sites. The domain beneath links to the site's WordPress admin.">Site</th><th title="Installed TFM Custom Functions version. A ▲ means the site is behind the latest release.">Plugin</th><th title="PHP version (red = end-of-life, upgrade the server) and WordPress core version.">PHP / WP</th><th title="Days until the site's TLS certificate expires. Amber under 30 days, red under 15 or expired. Re-checked every 12 hours.">SSL</th><th title="Deprecated head/footer custom scripts found on the site (with total size). Move into Elementor → Custom Code, then remove.">Custom code</th><th title="Secure Custom Fields / ACF active. Only Press Releases used it (now optional) — 'Active' means it can be removed if nothing else needs it.">SCF</th><th title="Search-engine indexing (Settings → Reading → 'Discourage search engines'). On = indexable; Off = noindex, a problem on a live site.">Index</th><th title="Consent system in use. Tracking = TFM Tracking Consent enforcing the visitor's choice; Banner only = a banner with no enforcement; Off = none.">Consent</th><th title="Update health. Auto = self-updating; Auto off = disabled; Token set = a leftover GitHub token that can block updates.">Updates</th><th title="How long since the site was last confirmed alive — heartbeat or successful ping.">Last seen</th><th title="Up or Down, decided by direct ping. Down only after ~45 minutes with no contact of any kind.">Status</th><th></th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>
     <div id="empty" style="display:${rows.length ? 'none' : 'block'}">No sites have checked in yet.</div>
   </div></div>
 
-  <div class="foot"><span class="live"></span> Live &middot; status by direct ping &middot; auto-refreshes every 5 min</div>
+  <div class="foot"><span class="live"></span> Live &middot; status by direct ping &middot; SSL re-checked every 12h &middot; auto-refreshes every 5 min</div>
 </div>
 <script>
 (function(){
   var params = new URLSearchParams(location.search);
   var key = params.get('key') || '';
+  var seg = 'all';
   function num(id,n){ var el=document.getElementById(id); if(el) el.firstChild.nodeValue=String(n); }
   function recount(){
     var trs = document.querySelectorAll('tbody tr[data-host]');
-    var up=0, attn=0, custom=0, scf=0, idxoff=0, updissue=0, vers={};
+    var up=0, attn=0, custom=0, scf=0, idxoff=0, updissue=0, ssl=0, total=0, vers={};
     trs.forEach(function(tr){
+      if(tr.style.display==='none') return; // count only what's visible
+      total++;
       var s=tr.getAttribute('data-status');
       if(s==='up') up++; else attn++;
       if(tr.getAttribute('data-custom')==='1') custom++;
       if(tr.getAttribute('data-scf')==='1') scf++;
       if(tr.getAttribute('data-index')==='1') idxoff++;
       if(tr.getAttribute('data-updissue')==='1') updissue++;
+      if(tr.getAttribute('data-ssl')==='1') ssl++;
       var v=tr.getAttribute('data-ver'); if(v) vers[v]=1;
     });
-    num('stat-total', trs.length); num('stat-up', up); num('stat-attn', attn);
-    num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf); num('stat-idx', idxoff); num('stat-upd', updissue);
+    num('stat-total', total); num('stat-up', up); num('stat-attn', attn);
+    num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf);
+    num('stat-idx', idxoff); num('stat-upd', updissue); num('stat-ssl', ssl);
     var empty=document.getElementById('empty');
-    if(empty) empty.style.display = trs.length ? 'none' : 'block';
+    if(empty) empty.style.display = total ? 'none' : 'block';
   }
   window.tfmRemove = function(btn){
     var tr = btn.closest('tr'); var host = tr.getAttribute('data-host');
@@ -269,22 +318,29 @@ async function render(req, res) {
     var scfOnly = document.getElementById('scfonly').checked;
     var idxOnly = document.getElementById('idxoff').checked;
     var updOnly = document.getElementById('updonly').checked;
+    var sslOnly = document.getElementById('sslsoon').checked;
     document.querySelectorAll('tbody tr[data-host]').forEach(function(tr){
-      var matchText = !v || tr.getAttribute('data-filter').indexOf(v) > -1;
-      var matchCc = !ccOnly || tr.getAttribute('data-custom') === '1';
-      var matchScf = !scfOnly || tr.getAttribute('data-scf') === '1';
-      var matchIdx = !idxOnly || tr.getAttribute('data-index') === '1';
-      var matchUpd = !updOnly || tr.getAttribute('data-updissue') === '1';
-      tr.style.display = (matchText && matchCc && matchScf && matchIdx && matchUpd) ? '' : 'none';
+      var okSeg  = seg === 'all' || tr.getAttribute('data-type') === seg;
+      var okText = !v || tr.getAttribute('data-filter').indexOf(v) > -1;
+      var okCc   = !ccOnly || tr.getAttribute('data-custom') === '1';
+      var okScf  = !scfOnly || tr.getAttribute('data-scf') === '1';
+      var okIdx  = !idxOnly || tr.getAttribute('data-index') === '1';
+      var okUpd  = !updOnly || tr.getAttribute('data-updissue') === '1';
+      var okSsl  = !sslOnly || tr.getAttribute('data-ssl') === '1';
+      tr.style.display = (okSeg && okText && okCc && okScf && okIdx && okUpd && okSsl) ? '' : 'none';
     });
+    recount();
   }
   document.getElementById('q').addEventListener('input', applyFilter);
-  document.getElementById('cconly').addEventListener('change', applyFilter);
-  document.getElementById('scfonly').addEventListener('change', applyFilter);
-  document.getElementById('updonly').addEventListener('change', applyFilter);
-  document.getElementById('idxoff').addEventListener('change', applyFilter);
-  // 5 minutes, not 1. Sites heartbeat every 10 minutes, so a 60s refresh showed
-  // nothing new 4 times out of 5 while costing a full round of KV reads.
+  ['cconly','scfonly','idxoff','updonly','sslsoon'].forEach(function(id){
+    document.getElementById(id).addEventListener('change', applyFilter);
+  });
+  document.getElementById('seg').addEventListener('click', function(e){
+    var b = e.target.closest('.seg-btn'); if(!b) return;
+    seg = b.getAttribute('data-seg');
+    this.querySelectorAll('.seg-btn').forEach(function(x){ x.classList.toggle('active', x===b); });
+    applyFilter();
+  });
   setTimeout(function(){ location.reload(); }, 300000);
 })();
 </script>
@@ -294,8 +350,6 @@ async function render(req, res) {
 }
 
 function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-// Decode HTML entities that may be baked into a stored site name (e.g. an
-// apostrophe as &#039;), so it displays as text rather than the raw entity.
 function decodeEntities(s){
   return String(s ?? '')
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(parseInt(h, 16)))
@@ -306,6 +360,10 @@ function decodeEntities(s){
 }
 function codePoint(n){ try { return String.fromCodePoint(n); } catch { return ''; } }
 function hostOf(u){ try { return new URL(u).host.replace(/:\d+$/, ''); } catch { return String(u || ''); } }
+// Dev/staging site = a tfmstaging.com subdomain (or a Plesk preview domain).
+function isDev(host){ return /(^|\.)tfmstaging\.com$/i.test(host) || /\.plesk\.page$/i.test(host); }
+// PHP end-of-life as of 2026: anything below 8.1.
+function phpEol(v){ const m = String(v || '').match(/^(\d+)\.(\d+)/); if(!m) return false; const M=+m[1], N=+m[2]; return M < 8 || (M === 8 && N < 1); }
 function ago(ms){ if(!ms || ms < 0) return '—'; const m = Math.round(ms/60000); if(m < 1) return 'just now'; if(m < 60) return m + ' min ago'; const h = Math.round(m/60); if(h < 48) return h + ' h ago'; return Math.round(h/24) + ' d ago'; }
 function fmtBytes(n){ n = Number(n) || 0; if(n < 1024) return n + ' B'; return (n/1024).toFixed(n < 10240 ? 1 : 0) + ' KB'; }
 function cmpVer(a, b){ const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number); for(let i = 0; i < Math.max(pa.length, pb.length); i++){ const x = pa[i]||0, y = pb[i]||0; if(x > y) return 1; if(x < y) return -1; } return 0; }

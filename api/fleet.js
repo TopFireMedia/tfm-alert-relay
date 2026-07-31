@@ -1,4 +1,4 @@
-import { kvMGet, kvSMembers, kvConfigured, kvDel, kvSRem } from '../lib/kv.js';
+import { kvMGet, kvSMembers, kvConfigured, kvDel, kvSRem, kvGet } from '../lib/kv.js';
 
 export default async function handler(req, res) {
   try {
@@ -56,6 +56,14 @@ async function render(req, res) {
   const rows = (hosts.length ? await kvMGet(hosts.map(h => `site:${h}`)) : []).filter(Boolean);
   rows.sort((a, b) => (decodeEntities(a.site_name) || '').localeCompare(decodeEntities(b.site_name) || ''));
 
+  // "On our server" — matched against the authoritative Plesk host list (fed to
+  // KV by the server cron via /api/onserver). Keyed to hostnames, not raw IP, so
+  // Cloudflare-proxied sites hosted on our box are still recognised as ours.
+  const onServerRaw = await kvGet('on_server_hosts');
+  const onServerSet = new Set((Array.isArray(onServerRaw) ? onServerRaw : []).map(normHost));
+  const serverKnown = onServerSet.size > 0;
+  const onServer = (host) => onServerSet.has(normHost(host));
+
   if (req.query.format === 'json') {
     res.setHeader('Content-Type', 'application/json');
     return res.status(200).send(JSON.stringify(rows, null, 2));
@@ -80,12 +88,14 @@ async function render(req, res) {
   const nIndexOff = rows.filter(r => r.search_indexing === false).length;
   const nUpdIssue = rows.filter(r => r.auto_update === false || r.update_token_set === true).length;
   const nSsl = rows.filter(sslSoon).length;
+  const nServer = rows.filter(r => onServer(hostOf(r.site_url))).length;
 
   const rowsHtml = rows.map(r => {
     const st = statusOf(r);
     const label = st === 'down' ? 'Down' : (st === 'stale' ? 'Stale' : 'Up');
     const host = hostOf(r.site_url);
     const dev = isDev(host);
+    const srv = serverKnown ? onServer(host) : null;
     const name = decodeEntities(r.site_name);
     const outdated = r.plugin_version && latest && cmpVer(r.plugin_version, latest) < 0;
     const ver = esc(r.plugin_version || '—');
@@ -135,8 +145,11 @@ async function render(req, res) {
 
     const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
     const filterKey = esc((name + ' ' + host).toLowerCase());
-    return `<tr data-host="${esc(host)}" data-type="${dev ? 'dev' : 'client'}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-updissue="${updIssue ? '1' : '0'}" data-ssl="${sslSoon(r) ? '1' : '0'}" data-filter="${filterKey}">
-      <td class="c-name">${esc(name)}${dev ? ' <span class="ptag ptag-dev" title="Development / staging site (tfmstaging.com)">dev</span>' : ''}<div class="c-sub"><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></div></td>
+    const srvBadge = srv === null ? ''
+      : (srv ? ' <span class="ptag ptag-srv" title="Hosted on our Plesk server">ours</span>'
+             : ' <span class="ptag ptag-ext" title="Hosted elsewhere — not on our server">ext</span>');
+    return `<tr data-host="${esc(host)}" data-type="${dev ? 'dev' : 'client'}" data-server="${srv ? '1' : '0'}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-updissue="${updIssue ? '1' : '0'}" data-ssl="${sslSoon(r) ? '1' : '0'}" data-filter="${filterKey}">
+      <td class="c-name c-srv-${srv === null ? 'unknown' : (srv ? 'yes' : 'no')}">${esc(name)}${dev ? ' <span class="ptag ptag-dev" title="Development / staging site (tfmstaging.com)">dev</span>' : ''}<div class="c-sub"><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a>${srvBadge}</div></td>
       <td>${verCell}</td>
       <td class="c-mut">${stackCell}</td>
       <td>${sslCell}</td>
@@ -219,6 +232,11 @@ async function render(req, res) {
   .ptag{display:inline-block;font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
     padding:.05rem .3rem;border-radius:4px;vertical-align:middle;margin-left:5px}
   .ptag-dev{color:var(--info);background:color-mix(in srgb,var(--info) 15%,transparent)}
+  .ptag-srv{color:var(--up);background:color-mix(in srgb,var(--up) 15%,transparent)}
+  .ptag-ext{color:var(--stale);background:color-mix(in srgb,var(--stale) 16%,transparent)}
+  .c-srv-yes{box-shadow:inset 3px 0 0 var(--up)}
+  .c-srv-no{box-shadow:inset 3px 0 0 var(--stale)}
+  .stat.srv .v{color:var(--up)}
   .ver{display:inline-block;font:600 .78rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;
     padding:.28rem .5rem;border-radius:6px;background:color-mix(in srgb,var(--ink) 7%,transparent)}
   .ver-old{background:color-mix(in srgb,var(--stale) 18%,transparent);color:var(--stale)}
@@ -254,6 +272,7 @@ async function render(req, res) {
       <label class="toggle"><input type="checkbox" id="idxoff"> Indexing off</label>
       <label class="toggle"><input type="checkbox" id="updonly"> Update issues</label>
       <label class="toggle"><input type="checkbox" id="sslsoon"> SSL &lt;30d</label>
+      ${serverKnown ? '<label class="toggle"><input type="checkbox" id="srvonly"> On our server</label>' : ''}
       <button class="btn" onclick="location.reload()">&#8635; Refresh</button>
     </div>
   </header>
@@ -269,6 +288,7 @@ async function render(req, res) {
 
   <div class="stats">
     <div class="stat"><div class="k">Sites</div><div class="v" id="stat-total">${rows.length}</div></div>
+    ${serverKnown ? `<div class="stat srv"><div class="k">On our server</div><div class="v" id="stat-srv">${nServer}<small>of ${rows.length}</small></div></div>` : ''}
     <div class="stat up"><div class="k">Up</div><div class="v" id="stat-up">${nUp}</div></div>
     <div class="stat attn ${(nDown + nStale) ? '' : 'zero'}"><div class="k">Needs attention</div><div class="v" id="stat-attn">${nDown + nStale}<small>${nDown} down &middot; ${nStale} stale</small></div></div>
     <div class="stat"><div class="k">Plugin versions</div><div class="v" id="stat-ver">${nVer}<small>${nOutdated} behind latest</small></div></div>
@@ -299,7 +319,7 @@ async function render(req, res) {
   function num(id,n){ var el=document.getElementById(id); if(el) el.firstChild.nodeValue=String(n); }
   function recount(){
     var trs = document.querySelectorAll('tbody tr[data-host]');
-    var up=0, attn=0, custom=0, scf=0, idxoff=0, updissue=0, ssl=0, total=0, vers={};
+    var up=0, attn=0, custom=0, scf=0, idxoff=0, updissue=0, ssl=0, server=0, total=0, vers={};
     trs.forEach(function(tr){
       if(tr.style.display==='none') return; // count only what's visible
       total++;
@@ -310,11 +330,13 @@ async function render(req, res) {
       if(tr.getAttribute('data-index')==='1') idxoff++;
       if(tr.getAttribute('data-updissue')==='1') updissue++;
       if(tr.getAttribute('data-ssl')==='1') ssl++;
+      if(tr.getAttribute('data-server')==='1') server++;
       var v=tr.getAttribute('data-ver'); if(v) vers[v]=1;
     });
     num('stat-total', total); num('stat-up', up); num('stat-attn', attn);
     num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf);
     num('stat-idx', idxoff); num('stat-upd', updissue); num('stat-ssl', ssl);
+    if(document.getElementById('stat-srv')) num('stat-srv', server);
     var empty=document.getElementById('empty');
     if(empty) empty.style.display = total ? 'none' : 'block';
   }
@@ -334,6 +356,8 @@ async function render(req, res) {
     var idxOnly = document.getElementById('idxoff').checked;
     var updOnly = document.getElementById('updonly').checked;
     var sslOnly = document.getElementById('sslsoon').checked;
+    var srvEl = document.getElementById('srvonly');
+    var srvOnly = srvEl && srvEl.checked;
     document.querySelectorAll('tbody tr[data-host]').forEach(function(tr){
       var okSeg  = seg === 'all' || tr.getAttribute('data-type') === seg;
       var okText = !v || tr.getAttribute('data-filter').indexOf(v) > -1;
@@ -342,13 +366,15 @@ async function render(req, res) {
       var okIdx  = !idxOnly || tr.getAttribute('data-index') === '1';
       var okUpd  = !updOnly || tr.getAttribute('data-updissue') === '1';
       var okSsl  = !sslOnly || tr.getAttribute('data-ssl') === '1';
-      tr.style.display = (okSeg && okText && okCc && okScf && okIdx && okUpd && okSsl) ? '' : 'none';
+      var okSrv  = !srvOnly || tr.getAttribute('data-server') === '1';
+      tr.style.display = (okSeg && okText && okCc && okScf && okIdx && okUpd && okSsl && okSrv) ? '' : 'none';
     });
     recount();
   }
   document.getElementById('q').addEventListener('input', applyFilter);
-  ['cconly','scfonly','idxoff','updonly','sslsoon'].forEach(function(id){
-    document.getElementById(id).addEventListener('change', applyFilter);
+  ['cconly','scfonly','idxoff','updonly','sslsoon','srvonly'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(el) el.addEventListener('change', applyFilter);
   });
   document.getElementById('seg').addEventListener('click', function(e){
     var b = e.target.closest('.seg-btn'); if(!b) return;
@@ -384,6 +410,8 @@ function decodeEntities(s){
 }
 function codePoint(n){ try { return String.fromCodePoint(n); } catch { return ''; } }
 function hostOf(u){ try { return new URL(u).host.replace(/:\d+$/, ''); } catch { return String(u || ''); } }
+// Normalise a hostname for comparison: lowercase, strip scheme/path/port and a leading www.
+function normHost(h){ return String(h || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/:\d+$/, '').replace(/^www\./, ''); }
 // Dev/staging site = a tfmstaging.com subdomain (or a Plesk preview domain).
 function isDev(host){ return /(^|\.)tfmstaging\.com$/i.test(host) || /\.plesk\.page$/i.test(host); }
 // PHP end-of-life as of 2026: anything below 8.1.

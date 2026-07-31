@@ -4,6 +4,7 @@
 //   GET  ?key=TOKEN&task=ID                  -> task name/status/description + comments
 //   GET  ?key=TOKEN&task=ID&post=1&text=...  -> post a comment (optional &assignee=<id>)
 //   GET  ?key=TOKEN&doc=DOCID                 -> read a Doc's pages (name + markdown content)
+//   GET  ?key=TOKEN&checklist=CLID&check_item=ITEMID[&resolved=0] -> resolve/unresolve a checklist item
 export default async function handler(req, res) {
   const token = process.env.DASHBOARD_TOKEN || '';
   if (!token || req.query.key !== token) return res.status(401).json({ error: 'unauthorized' });
@@ -29,6 +30,19 @@ export default async function handler(req, res) {
         if (String(t.id) === team) (t.members || []).forEach((m) => members.push({ id: m.user.id, username: m.user.username, email: m.user.email }));
       });
       return res.status(200).json({ members });
+    }
+
+    // Check/uncheck a checklist item: ?checklist=CLID&check_item=ITEMID[&resolved=0]
+    if (req.query.check_item) {
+      const clId = String(req.query.checklist || '').trim();
+      const itemId = String(req.query.check_item).trim();
+      if (!clId) return res.status(400).json({ error: 'missing checklist id' });
+      const resolved = req.query.resolved !== '0';
+      const r = await fetch(`${base}/checklist/${encodeURIComponent(clId)}/checklist_item/${encodeURIComponent(itemId)}`, {
+        method: 'PUT', headers, body: JSON.stringify({ resolved }),
+      });
+      const j = await r.json().catch(() => ({}));
+      return res.status(r.status).json({ ok: r.ok, resolved, item: itemId, response: j });
     }
 
     if (req.query.doc) {
@@ -88,11 +102,11 @@ export default async function handler(req, res) {
       id: task.id, name: task.name, status: task.status && task.status.status, url: task.url,
       description: task.description || task.text_content || '',
       checklists: (task.checklists || []).map((cl) => ({
-        name: cl.name,
+        id: cl.id, name: cl.name,
         resolved: cl.resolved, unresolved: cl.unresolved,
         items: (cl.items || [])
           .sort((a, b) => (a.orderindex || 0) - (b.orderindex || 0))
-          .map((it) => ({ name: it.name, resolved: !!it.resolved })),
+          .map((it) => ({ id: it.id, name: it.name, resolved: !!it.resolved })),
       })),
       comments: (cj.comments || []).map((x) => ({ id: x.user && x.user.id, user: x.user && x.user.username, date: x.date, text: x.comment_text })),
     });

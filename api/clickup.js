@@ -87,6 +87,13 @@ export default async function handler(req, res) {
     return res.status(200).json({
       id: task.id, name: task.name, status: task.status && task.status.status, url: task.url,
       description: task.description || task.text_content || '',
+      checklists: (task.checklists || []).map((cl) => ({
+        name: cl.name,
+        resolved: cl.resolved, unresolved: cl.unresolved,
+        items: (cl.items || [])
+          .sort((a, b) => (a.orderindex || 0) - (b.orderindex || 0))
+          .map((it) => ({ name: it.name, resolved: !!it.resolved })),
+      })),
       comments: (cj.comments || []).map((x) => ({ id: x.user && x.user.id, user: x.user && x.user.username, date: x.date, text: x.comment_text })),
     });
   } catch (e) {

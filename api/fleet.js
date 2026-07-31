@@ -81,8 +81,6 @@ async function render(req, res) {
   const nUp = rows.filter(r => statusOf(r) === 'up').length;
   const nDown = rows.filter(r => statusOf(r) === 'down').length;
   const nStale = rows.filter(r => statusOf(r) === 'stale').length;
-  const nVer = new Set(versions).size;
-  const nOutdated = rows.filter(r => r.plugin_version && latest && cmpVer(r.plugin_version, latest) < 0).length;
   const nCustom = rows.filter(hasCustom).length;
   const nScf = rows.filter(hasScf).length;
   const nIndexOff = rows.filter(r => r.search_indexing === false).length;
@@ -291,7 +289,6 @@ async function render(req, res) {
     ${serverKnown ? `<div class="stat srv"><div class="k">On our server</div><div class="v" id="stat-srv">${nServer}<small>of ${rows.length}</small></div></div>` : ''}
     <div class="stat up"><div class="k">Up</div><div class="v" id="stat-up">${nUp}</div></div>
     <div class="stat attn ${(nDown + nStale) ? '' : 'zero'}"><div class="k">Needs attention</div><div class="v" id="stat-attn">${nDown + nStale}<small>${nDown} down &middot; ${nStale} stale</small></div></div>
-    <div class="stat"><div class="k">Plugin versions</div><div class="v" id="stat-ver">${nVer}<small>${nOutdated} behind latest</small></div></div>
     <div class="stat ssl ${nSsl ? '' : 'zero'}"><div class="k">SSL &lt; 30 days</div><div class="v" id="stat-ssl">${nSsl}<small>renew certs</small></div></div>
     <div class="stat cc ${nCustom ? '' : 'zero'}"><div class="k">Custom code</div><div class="v" id="stat-cc">${nCustom}<small>migrate to Elementor</small></div></div>
     <div class="stat scf ${nScf ? '' : 'zero'}"><div class="k">SCF active</div><div class="v" id="stat-scf">${nScf}<small>removable</small></div></div>
@@ -319,7 +316,7 @@ async function render(req, res) {
   function num(id,n){ var el=document.getElementById(id); if(el) el.firstChild.nodeValue=String(n); }
   function recount(){
     var trs = document.querySelectorAll('tbody tr[data-host]');
-    var up=0, attn=0, custom=0, scf=0, idxoff=0, updissue=0, ssl=0, server=0, total=0, vers={};
+    var up=0, attn=0, custom=0, scf=0, idxoff=0, updissue=0, ssl=0, server=0, total=0;
     trs.forEach(function(tr){
       if(tr.style.display==='none') return; // count only what's visible
       total++;
@@ -331,10 +328,9 @@ async function render(req, res) {
       if(tr.getAttribute('data-updissue')==='1') updissue++;
       if(tr.getAttribute('data-ssl')==='1') ssl++;
       if(tr.getAttribute('data-server')==='1') server++;
-      var v=tr.getAttribute('data-ver'); if(v) vers[v]=1;
     });
     num('stat-total', total); num('stat-up', up); num('stat-attn', attn);
-    num('stat-ver', Object.keys(vers).length); num('stat-cc', custom); num('stat-scf', scf);
+    num('stat-cc', custom); num('stat-scf', scf);
     num('stat-idx', idxoff); num('stat-upd', updissue); num('stat-ssl', ssl);
     if(document.getElementById('stat-srv')) num('stat-srv', server);
     var empty=document.getElementById('empty');

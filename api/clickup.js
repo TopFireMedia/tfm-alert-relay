@@ -34,15 +34,29 @@ export default async function handler(req, res) {
     if (req.query.doc) {
       const docId = String(req.query.doc).trim();
       const v3 = 'https://api.clickup.com/api/v3';
+      // Single page: ?doc=DOC&page=PAGE
+      if (req.query.page) {
+        const pageId = String(req.query.page).trim();
+        const pr = await fetch(`${v3}/workspaces/${team}/docs/${encodeURIComponent(docId)}/pages/${encodeURIComponent(pageId)}?content_format=text%2Fmd`, { headers });
+        if (!pr.ok) return res.status(pr.status).json({ error: 'page fetch failed', detail: (await pr.text()).slice(0, 300) });
+        const p = await pr.json();
+        return res.status(200).json({ id: p.id, parent_page_id: p.parent_page_id, name: p.name, content: p.content || '' });
+      }
       const url = `${v3}/workspaces/${team}/docs/${encodeURIComponent(docId)}/pages?content_format=text%2Fmd&max_page_depth=-1`;
       const r = await fetch(url, { headers });
       if (!r.ok) return res.status(r.status).json({ error: 'doc fetch failed', detail: (await r.text()).slice(0, 300) });
       const j = await r.json();
-      const pages = Array.isArray(j) ? j : (j.pages || []);
-      return res.status(200).json({
-        doc: docId,
-        pages: pages.map((p) => ({ id: p.id, parent_page_id: p.parent_page_id, name: p.name, content: p.content })),
+      const roots = Array.isArray(j) ? j : (j.pages || []);
+      const flat = [];
+      const namesOnly = req.query.toc ? true : false;
+      const walk = (arr) => arr.forEach((p) => {
+        flat.push(namesOnly
+          ? { id: p.id, parent_page_id: p.parent_page_id, name: p.name }
+          : { id: p.id, parent_page_id: p.parent_page_id, name: p.name, content: p.content || '' });
+        if (Array.isArray(p.pages) && p.pages.length) walk(p.pages);
       });
+      walk(roots);
+      return res.status(200).json({ doc: docId, count: flat.length, pages: flat });
     }
 
     const id = String(req.query.task || '').trim();

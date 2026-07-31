@@ -8,7 +8,7 @@ export default async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
   body = body || {};
-  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active, search_indexing, auto_update, update_token_set } = body;
+  const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active, search_indexing, auto_update, update_token_set, cookie_consent } = body;
   if (!site_url) return res.status(400).json({ error: 'missing site_url' });
 
   const host = hostOf(site_url);
@@ -29,6 +29,9 @@ export default async function handler(req, res) {
     // Update health (3.31.0+) — tri-state so old sites show "—" not a false flag.
     auto_update: (auto_update === true || auto_update === false) ? auto_update : (prev ? prev.auto_update : undefined),
     update_token_set: (update_token_set === true || update_token_set === false) ? update_token_set : (prev ? prev.update_token_set : undefined),
+    // Consent system in use (tracking / cookie[legacy] / none). Gate for removing
+    // the legacy cookie-consent module: it's safe once no site reports 'cookie'.
+    cookie_consent: (cookie_consent && typeof cookie_consent === 'object') ? cookie_consent : (prev ? prev.cookie_consent : undefined),
     // A heartbeat is positive proof the site is up (and outbound, so it isn't
     // firewall-blocked the way an inbound ping can be). last_heartbeat lets the
     // monitor veto a false "down" from a blocked/timed-out ping.

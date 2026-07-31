@@ -3,6 +3,7 @@
 //   GET  ?key=TOKEN&members=1                -> workspace members (id/username) to find a user
 //   GET  ?key=TOKEN&task=ID                  -> task name/status/description + comments
 //   GET  ?key=TOKEN&task=ID&post=1&text=...  -> post a comment (optional &assignee=<id>)
+//   GET  ?key=TOKEN&doc=DOCID                 -> read a Doc's pages (name + markdown content)
 export default async function handler(req, res) {
   const token = process.env.DASHBOARD_TOKEN || '';
   if (!token || req.query.key !== token) return res.status(401).json({ error: 'unauthorized' });
@@ -28,6 +29,20 @@ export default async function handler(req, res) {
         if (String(t.id) === team) (t.members || []).forEach((m) => members.push({ id: m.user.id, username: m.user.username, email: m.user.email }));
       });
       return res.status(200).json({ members });
+    }
+
+    if (req.query.doc) {
+      const docId = String(req.query.doc).trim();
+      const v3 = 'https://api.clickup.com/api/v3';
+      const url = `${v3}/workspaces/${team}/docs/${encodeURIComponent(docId)}/pages?content_format=text%2Fmd&max_page_depth=-1`;
+      const r = await fetch(url, { headers });
+      if (!r.ok) return res.status(r.status).json({ error: 'doc fetch failed', detail: (await r.text()).slice(0, 300) });
+      const j = await r.json();
+      const pages = Array.isArray(j) ? j : (j.pages || []);
+      return res.status(200).json({
+        doc: docId,
+        pages: pages.map((p) => ({ id: p.id, parent_page_id: p.parent_page_id, name: p.name, content: p.content })),
+      });
     }
 
     const id = String(req.query.task || '').trim();

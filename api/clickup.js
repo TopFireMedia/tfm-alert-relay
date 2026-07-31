@@ -32,6 +32,37 @@ export default async function handler(req, res) {
       return res.status(200).json({ members });
     }
 
+    // Filtered task lookup: ?tasks=1[&assignee=ID][&due_gt=MS][&due_lt=MS][&include_closed=1]
+    if (req.query.tasks) {
+      const params = new URLSearchParams();
+      params.set('include_closed', req.query.include_closed ? 'true' : 'false');
+      params.set('subtasks', 'true');
+      if (req.query.assignee) params.append('assignees[]', String(req.query.assignee));
+      if (req.query.due_gt) params.set('due_date_gt', String(req.query.due_gt));
+      if (req.query.due_lt) params.set('due_date_lt', String(req.query.due_lt));
+      let page = 0, out = [], more = true;
+      while (more && page < 15) {
+        const r = await fetch(`${base}/team/${team}/task?${params.toString()}&page=${page}`, { headers });
+        if (!r.ok) return res.status(r.status).json({ error: 'task query failed', detail: (await r.text()).slice(0, 300) });
+        const j = await r.json();
+        const arr = j.tasks || [];
+        out.push(...arr);
+        more = arr.length === 100;
+        page++;
+      }
+      return res.status(200).json({
+        count: out.length,
+        tasks: out.map((t) => ({
+          id: t.id, name: t.name,
+          status: t.status && t.status.status, status_type: t.status && t.status.type,
+          due_date: t.due_date,
+          assignees: (t.assignees || []).map((a) => a.username),
+          list: t.list && t.list.name, folder: t.folder && t.folder.name, space: t.space && t.space.name,
+          url: t.url,
+        })),
+      });
+    }
+
     // Check/uncheck a checklist item: ?checklist=CLID&check_item=ITEMID[&resolved=0]
     if (req.query.check_item) {
       const clId = String(req.query.checklist || '').trim();

@@ -99,8 +99,7 @@ async function render(req, res) {
     const adminUrl = (r.admin_url && String(r.admin_url)) || (String(r.site_url || '').replace(/\/+$/, '') + '/wp-admin/');
     const filterKey = esc((name + ' ' + host).toLowerCase());
     return `<tr data-host="${esc(host)}" data-status="${st}" data-ver="${esc(r.plugin_version || '')}" data-custom="${cc ? '1' : '0'}" data-scf="${scf ? '1' : '0'}" data-index="${idx === false ? '1' : '0'}" data-updissue="${updIssue ? '1' : '0'}" data-filter="${filterKey}">
-      <td class="c-name">${esc(name)}</td>
-      <td><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></td>
+      <td class="c-name">${esc(name)}<div class="c-sub"><a class="c-dom" href="${esc(adminUrl)}" target="_blank" rel="noopener" title="Open ${esc(host)} wp-admin">${esc(host)} &#8599;</a></div></td>
       <td>${verCell}</td>
       <td class="c-mut">${esc(r.php_version || '—')}</td>
       <td class="c-mut">${esc(r.wp_version || '—')}</td>
@@ -131,7 +130,7 @@ async function render(req, res) {
   body{margin:0;background:var(--bg);color:var(--ink);
     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased}
-  .wrap{max-width:1200px;margin:0 auto;padding:28px 20px 56px}
+  .wrap{max-width:1320px;margin:0 auto;padding:28px 20px 56px}
   header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}
   .brand{display:flex;align-items:center;gap:12px;flex:1;min-width:220px}
   .mark{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;font-size:22px;
@@ -158,15 +157,16 @@ async function render(req, res) {
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
   .table-wrap{overflow-x:auto}
   table{border-collapse:collapse;width:100%;font-size:.9rem}
-  thead th{position:sticky;top:0;background:var(--card);text-align:left;padding:.7rem .85rem;
+  thead th{position:sticky;top:0;background:var(--card);text-align:left;padding:.6rem .6rem;cursor:help;
     font-size:.7rem;text-transform:uppercase;letter-spacing:.045em;color:var(--mut);
     font-weight:600;border-bottom:1px solid var(--line);white-space:nowrap}
-  tbody td{padding:.7rem .85rem;border-bottom:1px solid var(--line);vertical-align:middle}
+  tbody td{padding:.55rem .6rem;border-bottom:1px solid var(--line);vertical-align:middle}
   tbody tr:last-child td{border-bottom:0}
   tbody tr{transition:background .12s,opacity .28s,transform .28s}
   tbody tr:hover{background:color-mix(in srgb,var(--accentB) 5%,transparent)}
   tbody tr.removing{opacity:0;transform:translateX(14px)}
-  .c-name{font-weight:600}
+  .c-name{font-weight:600;line-height:1.25}
+  .c-sub{margin-top:2px;font-size:.8rem;font-weight:400}
   .c-dom{color:var(--mut);text-decoration:none} .c-dom:hover{color:var(--accentB);text-decoration:underline}
   .c-mut{color:var(--mut);white-space:nowrap}
   .ver{display:inline-block;font:600 .78rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -223,7 +223,7 @@ async function render(req, res) {
   <div class="card"><div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Site</th><th>Admin</th><th>Plugin</th><th>PHP</th><th>WP</th><th>Custom code</th><th>SCF</th><th>Index</th><th>Updates</th><th>Last seen</th><th>Status</th><th></th>
+        <th title="Site name. The domain beneath it links straight to that site's WordPress admin login.">Site</th><th title="Installed TFM Custom Functions version. A ▲ means the site is behind the latest release.">Plugin</th><th title="PHP version running on the server.">PHP</th><th title="WordPress core version.">WP</th><th title="Deprecated head/footer custom scripts found on the site (with total size). Move these into Elementor → Custom Code, then remove them here.">Custom code</th><th title="Secure Custom Fields / ACF plugin active. Only Press Releases used it, and that's now optional — so 'Active' means SCF can be removed if nothing else on the site needs it.">SCF</th><th title="Search-engine indexing (WordPress → Settings → Reading → 'Discourage search engines'). On = indexable; Off = noindex, which is a problem on a live production site.">Index</th><th title="Update health. Auto = self-updating normally; Auto off = auto-update disabled; Token set = a leftover GitHub token that can block update checks. '—' means the site isn't reporting this yet.">Updates</th><th title="How long since the site was last confirmed alive — by its heartbeat or a successful ping.">Last seen</th><th title="Up or Down, decided by pinging the site directly. Only marked down after ~45 minutes with no contact of any kind.">Status</th><th></th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>

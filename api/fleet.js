@@ -19,13 +19,16 @@ export default async function handler(req, res) {
 
 async function render(req, res) {
   const token = process.env.DASHBOARD_TOKEN || '';
-  const key = req.query.key || '';
   if (token) {
     const cookieTok = getCookie(req, 'tfm_dash');
-    if (key === token) {
-      // Fresh auth via ?key — stash it in an HttpOnly cookie so the token stops
-      // living in the address bar, browser history, and outbound referrers, then
-      // strip it from the URL. API/remove calls just proceed.
+    const queryKey = req.query.key || '';
+    const bodyKey = req.method === 'POST' ? await readBodyKey(req) : '';
+    const submitted = queryKey || bodyKey;
+
+    if (submitted === token) {
+      // Valid credential (via the password form, or a legacy ?key= link) — stash
+      // it in an HttpOnly cookie so the token stops living in the URL/history/
+      // referrers, then land on a clean URL. API/remove calls just proceed.
       res.setHeader('Set-Cookie', `tfm_dash=${encodeURIComponent(token)}; Path=/api; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`);
       if (!req.query.remove && req.query.format !== 'json') {
         res.statusCode = 302;
@@ -33,7 +36,14 @@ async function render(req, res) {
         return res.end();
       }
     } else if (cookieTok !== token) {
-      return res.status(401).send('Unauthorized — append ?key=YOUR_TOKEN');
+      // Not authenticated. Machine endpoints stay terse; the interactive page
+      // shows a password prompt (same key), so the shareable link never needs
+      // the token in the URL.
+      if (req.query.format === 'json' || req.query.remove) {
+        return res.status(401).send('Unauthorized');
+      }
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.status(req.method === 'POST' ? 401 : 200).send(loginPage(req.method === 'POST'));
     }
   }
   if (!kvConfigured()) return res.status(500).send('KV not configured');
@@ -384,6 +394,53 @@ async function render(req, res) {
 </body></html>`;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.status(200).send(html);
+}
+
+// Read the `key` field from a POSTed login form. Vercel's Node runtime usually
+// pre-parses the body; fall back to reading the raw stream.
+async function readBodyKey(req){
+  const b = req.body;
+  if (b && typeof b === 'object' && b.key != null) return String(b.key);
+  if (typeof b === 'string' && b) { try { return new URLSearchParams(b).get('key') || ''; } catch { return ''; } }
+  return await new Promise((resolve) => {
+    let data = '';
+    req.on('data', (c) => { data += c; if (data.length > 8192) { try { req.destroy(); } catch {} } });
+    req.on('end', () => { try { resolve(new URLSearchParams(data).get('key') || ''); } catch { resolve(''); } });
+    req.on('error', () => resolve(''));
+  });
+}
+
+// The password gate shown when there's no valid session cookie. Posts the key
+// back to /api/fleet, which sets the 30-day cookie and redirects to a clean URL.
+function loginPage(failed){
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>TFM Fleet Monitor</title>
+<style>
+  :root{--bg:#f5f6f8;--card:#fff;--ink:#1a1d21;--mut:#6b7280;--line:#e6e8ec;--accentA:#f97316;--accentB:#ef4444;--down:#dc2626}
+  @media(prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#161a21;--ink:#e8eaed;--mut:#98a1ad;--line:#242a33}}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  form{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:30px 28px;width:min(92vw,340px);
+    box-shadow:0 1px 2px rgba(16,24,40,.06),0 8px 28px rgba(16,24,40,.1);text-align:center}
+  .mark{width:52px;height:52px;border-radius:14px;display:grid;place-items:center;font-size:26px;margin:0 auto 14px;
+    background:linear-gradient(135deg,var(--accentA),var(--accentB))}
+  h1{font-size:1.15rem;margin:0 0 4px} p{color:var(--mut);font-size:.86rem;margin:0 0 18px}
+  input{width:100%;padding:.7rem .85rem;border:1px solid var(--line);border-radius:10px;background:var(--bg);
+    color:var(--ink);font-size:1rem;outline:none;margin-bottom:12px}
+  input:focus{border-color:var(--accentB)}
+  button{width:100%;padding:.7rem;border:0;border-radius:10px;font-size:.95rem;font-weight:600;cursor:pointer;color:#fff;
+    background:linear-gradient(135deg,var(--accentA),var(--accentB))}
+  .err{color:var(--down);font-size:.82rem;margin:-4px 0 12px}
+</style></head><body>
+<form method="POST" action="/api/fleet">
+  <div class="mark">&#128293;</div>
+  <h1>TFM Fleet Monitor</h1>
+  <p>Enter the access password to continue.</p>
+  ${failed ? '<div class="err">Incorrect password &mdash; try again.</div>' : ''}
+  <input type="password" name="key" placeholder="Password" autofocus autocomplete="current-password" required>
+  <button type="submit">Unlock</button>
+</form></body></html>`;
 }
 
 function getCookie(req, name){

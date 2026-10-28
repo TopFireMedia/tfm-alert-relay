@@ -103,6 +103,41 @@ export default async function handler(req, res) {
   return res.status(200).json({ ok: true, checked: recs.length, alerted, recovered, ssl_checked: sslDue.length, digested });
 }
 
+/**
+ * Routine changes recorded over the past week, as a digest section.
+ *
+ * Reports counts, not events: "14 posts deleted across 3 sites" rather than
+ * fourteen lines. Returns an empty string when nothing happened, so a quiet week
+ * does not add an empty heading.
+ */
+async function quietSummary(now) {
+  const labels = {
+    post_deleted: 'posts deleted',
+    core_updated: 'WordPress core updates',
+    plugin_activated: 'plugins activated',
+  };
+  const keys = [];
+  for (let back = 0; back < 2; back++) {
+    const d = new Date(now - back * 7 * 24 * 60 * 60 * 1000);
+    const y = d.getUTCFullYear();
+    const jan1 = Date.UTC(y, 0, 1);
+    const week = Math.ceil(((Date.UTC(y, d.getUTCMonth(), d.getUTCDate()) - jan1) / 86400000 + new Date(jan1).getUTCDay() + 1) / 7);
+    keys.push(`quiet:${y}-W${String(week).padStart(2, '0')}`);
+  }
+  const buckets = (await Promise.all(keys.map(k => kvGet(k).catch(() => null)))).filter(Boolean);
+  if (!buckets.length) return '';
+  const actions = {}, sites = new Set();
+  for (const b of buckets) {
+    for (const [a, n] of Object.entries(b.actions || {})) actions[a] = (actions[a] || 0) + n;
+    for (const s of Object.keys(b.sites || {})) sites.add(s);
+  }
+  const lines = Object.entries(actions)
+    .sort((a, b) => b[1] - a[1])
+    .map(([a, n]) => `- ${n} ${labels[a] || a.replace(/_/g, ' ')}`);
+  if (!lines.length) return '';
+  return `\n\n**Routine changes this week** (logged, not alerted) — across ${sites.size} site(s)\n` + lines.join('\n');
+}
+
 // Aggregate fleet health for the daily snapshot and the weekly digest.
 function aggregate(recs, now) {
   const STALE = 45 * 60 * 1000;
@@ -140,6 +175,12 @@ async function maybeDigestAndSnapshot(recs, now) {
   }
 
   if (!meta.last_digest || (now - meta.last_digest) >= DIGEST_INTERVAL_MS) {
+    /*
+     * Routine site changes are recorded by /api/alert rather than posted, so the
+     * channel stays for things needing attention soon. They still matter in
+     * aggregate, so the digest is where they surface.
+     */
+    const quiet = await quietSummary(now);
     try {
       await postAlert({
         title: `📊 Fleet weekly digest — ${agg.total} sites`,
@@ -150,7 +191,7 @@ async function maybeDigestAndSnapshot(recs, now) {
           `Update issues: ${agg.update_issues}\n` +
           `Custom code to migrate: ${agg.custom_code}\n` +
           `SCF active: ${agg.scf}\n` +
-          `Indexing off: ${agg.index_off}`,
+          `Indexing off: ${agg.index_off}` + quiet,
         tags: ['digest'],
       });
       digested = true;

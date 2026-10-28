@@ -1,5 +1,5 @@
 import tls from 'node:tls';
-import { kvGet, kvMGet, kvSet, kvSMembers, kvConfigured } from '../lib/kv.js';
+import { kvGet, kvMGet, kvSet, kvSMembers, kvConfigured, kvClaim } from '../lib/kv.js';
 import { createClickUpTask, hostOf } from '../lib/clickup.js';
 
 // "Down" means we have NOT heard from a site by ANY means — neither its outbound
@@ -11,6 +11,7 @@ import { createClickUpTask, hostOf } from '../lib/clickup.js';
 const DOWN_AFTER_MS = 45 * 60 * 1000;      // no contact (heartbeat or good ping) for this long => down
 const FRESH_WRITE_MS = 30 * 60 * 1000;     // on a good ping, only re-write last_seen if older than this
 const RECOVER_NOTIFY_MS = 15 * 60 * 1000;  // only alert "recovered" if it was actually down this long
+const ALERT_CLAIM_TTL_S = 30 * 60;         // one alert per site per event per 30 min, across overlapping runs
 const PING_TIMEOUT_MS = 4000;              // short + best-effort; aborted pings are harmless
 const SSL_INTERVAL_MS = 12 * 60 * 60 * 1000; // re-check a site's TLS cert at most every 12h
 const SSL_MAX_PER_RUN = 20;                  // cap cert checks per run so the function stays fast
@@ -46,6 +47,7 @@ export default async function handler(req, res) {
       if (typeof days === 'number' && days < SSL_ALERT_DAYS) {
         if (!rec.ssl_alerted) {
           rec.ssl_alerted = true; // once per expiry window
+          if (await kvClaim(`claim:ssl:${rec.host}`, 24 * 60 * 60).catch(() => false))
           createClickUpTask({
             title: `🔒 SSL expiring — ${rec.site_name}`,
             description: `**Site:** ${rec.site_name} (${rec.site_url})\nTLS certificate expires in **${days} day(s)**${days < 0 ? ' (ALREADY EXPIRED)' : ''}. Renew it before it lapses.`,
@@ -63,7 +65,7 @@ export default async function handler(req, res) {
         rec.last_seen = now; rec.last_ping = now;
         await kvSet(`site:${rec.host}`, rec);
       }
-      if (wasDown) recover(rec, recovered, 'a direct check succeeded', downMs);
+      if (wasDown) await recover(rec, recovered, 'a direct check succeeded', downMs);
       return;
     }
 
@@ -72,12 +74,19 @@ export default async function handler(req, res) {
     if (wasDown && !stale) {
       rec.status = 'up'; rec.down_since = null; rec.ping_fails = 0;
       await kvSet(`site:${rec.host}`, rec);
-      recover(rec, recovered, 'a heartbeat was received', downMs);
+      await recover(rec, recovered, 'a heartbeat was received', downMs);
     } else if (!wasDown && stale) {
       rec.status = 'down'; rec.down_since = now;
       await kvSet(`site:${rec.host}`, rec);
       alerted.push(rec.host);
       const quietMin = Math.round((now - lastSeen) / 60000);
+      /*
+       * Only the invocation that wins this claim posts. Two overlapping monitor
+       * passes both read the record as "up and stale" before either writes, so
+       * without this they both create a task - four identical "Site Down" tasks
+       * in the same minute is what the Site Alerts list actually contains.
+       */
+      if (!(await kvClaim(`claim:down:${rec.host}`, ALERT_CLAIM_TTL_S).catch(() => true))) return;
       try {
         await createClickUpTask({
           title: `🔴 Site Down — ${rec.site_name}`,
@@ -163,9 +172,11 @@ function cmpVer(a, b) {
   return 0;
 }
 
-function recover(rec, recovered, why, downMs) {
+async function recover(rec, recovered, why, downMs) {
   recovered.push(rec.host);
   if (downMs < RECOVER_NOTIFY_MS) return; // brief blip / false down being cleared — recover silently
+  // Same race as the down path: one claim, one notice.
+  if (!(await kvClaim(`claim:recovered:${rec.host}`, ALERT_CLAIM_TTL_S).catch(() => true))) return;
   createClickUpTask({
     title: `🟢 Recovered — ${rec.site_name}`,
     description: `**Site:** ${rec.site_name} (${rec.site_url})\nBack up after ~${Math.round(downMs / 60000)} min — ${why}.\n**Plugin:** ${rec.plugin_version}`,

@@ -104,6 +104,32 @@ export default async function handler(req, res) {
 }
 
 /**
+ * AI Gateway balance for the weekly digest.
+ *
+ * Read from webqc's read-only /api/credits, not /api/credits-check: the latter
+ * is the cron's endpoint and sends the low-balance email as a side effect, so
+ * merely reading the number through it would email people every week.
+ *
+ * Returns an empty string on any failure. A digest that reports fleet health is
+ * worth sending even when one optional line could not be fetched.
+ */
+async function balanceLine() {
+  const url = process.env.WEBQC_CREDITS_URL;
+  const token = process.env.WEBQC_TRIGGER_TOKEN;
+  if (!url || !token) return '';
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 8000);
+    const r = await fetch(url, { headers: { 'x-webqc-token': token }, signal: c.signal });
+    clearTimeout(t);
+    if (!r.ok) return '';
+    const d = await r.json();
+    if (typeof d.balance !== 'number') return '';
+    return `\nAI Gateway balance: $${d.balance.toFixed(2)}`;
+  } catch { return ''; }
+}
+
+/**
  * Routine changes recorded over the past week, as a digest section.
  *
  * Reports counts, not events: "14 posts deleted across 3 sites" rather than
@@ -180,7 +206,7 @@ async function maybeDigestAndSnapshot(recs, now) {
      * channel stays for things needing attention soon. They still matter in
      * aggregate, so the digest is where they surface.
      */
-    const quiet = await quietSummary(now);
+    const [quiet, balance] = await Promise.all([quietSummary(now), balanceLine()]);
     try {
       await postAlert({
         title: `📊 Fleet weekly digest — ${agg.total} sites`,
@@ -191,7 +217,7 @@ async function maybeDigestAndSnapshot(recs, now) {
           `Update issues: ${agg.update_issues}\n` +
           `Custom code to migrate: ${agg.custom_code}\n` +
           `SCF active: ${agg.scf}\n` +
-          `Indexing off: ${agg.index_off}` + quiet,
+          `Indexing off: ${agg.index_off}` + balance + quiet,
         tags: ['digest'],
       });
       digested = true;

@@ -1,6 +1,6 @@
 import tls from 'node:tls';
 import { kvGet, kvMGet, kvSet, kvSMembers, kvConfigured, kvClaim } from '../lib/kv.js';
-import { createClickUpTask, hostOf } from '../lib/clickup.js';
+import { postAlert, hostOf } from '../lib/clickup.js';
 
 // "Down" means we have NOT heard from a site by ANY means — neither its outbound
 // heartbeat nor a successful inbound ping — for DOWN_AFTER_MS. A failed ping on
@@ -48,7 +48,7 @@ export default async function handler(req, res) {
         if (!rec.ssl_alerted) {
           rec.ssl_alerted = true; // once per expiry window
           if (await kvClaim(`claim:ssl:${rec.host}`, 24 * 60 * 60).catch(() => false))
-          createClickUpTask({
+          postAlert({
             title: `🔒 SSL expiring — ${rec.site_name}`,
             description: `**Site:** ${rec.site_name} (${rec.site_url})\nTLS certificate expires in **${days} day(s)**${days < 0 ? ' (ALREADY EXPIRED)' : ''}. Renew it before it lapses.`,
             tags: [rec.host, 'ssl'],
@@ -88,7 +88,7 @@ export default async function handler(req, res) {
        */
       if (!(await kvClaim(`claim:down:${rec.host}`, ALERT_CLAIM_TTL_S).catch(() => true))) return;
       try {
-        await createClickUpTask({
+        await postAlert({
           title: `🔴 Site Down — ${rec.site_name}`,
           description: `**Site:** ${rec.site_name} (${rec.site_url})\nNo heartbeat and no successful direct check for ~${quietMin} min.\n**Last plugin version:** ${rec.plugin_version}`,
           tags: [rec.host, 'down'],
@@ -141,7 +141,7 @@ async function maybeDigestAndSnapshot(recs, now) {
 
   if (!meta.last_digest || (now - meta.last_digest) >= DIGEST_INTERVAL_MS) {
     try {
-      await createClickUpTask({
+      await postAlert({
         title: `📊 Fleet weekly digest — ${agg.total} sites`,
         description:
           `**${agg.up} up · ${agg.down} down · ${agg.stale} stale**\n` +
@@ -177,7 +177,7 @@ async function recover(rec, recovered, why, downMs) {
   if (downMs < RECOVER_NOTIFY_MS) return; // brief blip / false down being cleared — recover silently
   // Same race as the down path: one claim, one notice.
   if (!(await kvClaim(`claim:recovered:${rec.host}`, ALERT_CLAIM_TTL_S).catch(() => true))) return;
-  createClickUpTask({
+  postAlert({
     title: `🟢 Recovered — ${rec.site_name}`,
     description: `**Site:** ${rec.site_name} (${rec.site_url})\nBack up after ~${Math.round(downMs / 60000)} min — ${why}.\n**Plugin:** ${rec.plugin_version}`,
     tags: [rec.host, 'recovered'],

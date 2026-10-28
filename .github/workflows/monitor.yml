@@ -10,10 +10,15 @@ name: Fleet down-check
 # after DOWN_AFTER_MS (45 min) without contact, so polling faster than that just
 # spent Upstash commands. 5 min still gives ~9 checks inside that window.
 
+# The schedule moved to Vercel cron (see vercel.json). GitHub disables scheduled
+# workflows in a repo after 60 days without commits, with no warning worth the
+# name: this one switched itself off on 3 Oct 2026 and fleet monitoring was dead
+# for 25 days before anyone noticed. A Vercel cron does not expire.
+#
+# Kept as a manual fallback only, for running the monitor by hand from the
+# Actions tab if the Vercel cron is ever the thing that is broken.
 on:
-  schedule:
-    - cron: '0 */2 * * *'   # fire often; the queued run takes over when the active one ends
-  workflow_dispatch: {}       # manual "start now" from the Actions tab
+  workflow_dispatch: {}
 
 concurrency:
   group: fleet-monitor

@@ -1,5 +1,5 @@
 import { kvGet, kvSet, kvSAdd, kvConfigured } from '../lib/kv.js';
-import { createClickUpTask, hostOf } from '../lib/clickup.js';
+import { postAlert, hostOf } from '../lib/clickup.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -52,7 +52,7 @@ export default async function handler(req, res) {
   if (prev && prev.status === 'down') {
     const downMin = prev.down_since ? Math.round((now - prev.down_since) / 60000) : 0;
     try {
-      await createClickUpTask({
+      await postAlert({
         title: `🟢 Recovered — ${rec.site_name}`,
         description: `**Site:** ${rec.site_name} (${site_url})\n**Back up** after ~${downMin} min down.\n**Plugin:** ${rec.plugin_version}`,
         tags: [host, 'recovered'],

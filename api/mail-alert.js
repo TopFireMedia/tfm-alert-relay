@@ -65,8 +65,38 @@ const REVOKED = /\b(removed|revoked|cancell?ed|expired|no longer has|terminated)
  */
 const GRANTED = /\b(granted|given you|added you|shared with you|access to their account)\b|\b(invit|delegat|collaborat)/i;
 
+/*
+ * A verb alone is not enough, as 400 days of analytics@ proved: the verbs above
+ * matched 60 of 531 vendor messages and 11 of those were marketing or billing.
+ * IONOS sends "Webinar Invitation: ..." on a schedule, Cloudflare sends "You're
+ * invited to Cloudflare Connect 2026" and "You're invited onto the field at
+ * Oracle Park", Wix sends "Your Premium Plan has been Canceled", IONOS sends
+ * "Your SSL Certificate Has Expired". All real invitations and cancellations;
+ * none of them access to anything we host.
+ *
+ * So the subject must also name the thing being granted. "join" is in the list
+ * because WP Engine's real invites read "has invited you to join <install-id>"
+ * and carry no other access noun.
+ *
+ * Same two-alternation shape as GRANTED, and for the same reason: a trailing \b
+ * after a stem kills it. The first draft of this list wrote "permission" and
+ * "collaborat" as whole words and silently dropped Namecheap's "Permissions
+ * invitation" and SiteGround's "Cancelled collaboration" - both real events.
+ */
+const ACCESS_CONTEXT =
+  /\b(account|access|team|join)\b|\b(permission|collaborat|delegat|environment|organi[sz]|manage|member|user)/i;
+
+/*
+ * Subjects that use the vocabulary but are never about access. Checked first so
+ * a recurring marketing series can never reach the channel.
+ */
+const NOT_ACCESS =
+  /\b(webinar|conference|summit|register|rsvp|newsletter|ticket|connect 20\d\d|certificate|ssl|premium plan|subscription|renewal|invoice|receipt|contact)\b/i;
+
 export function classify(subject) {
   const s = String(subject || '');
+  if (NOT_ACCESS.test(s)) return null;
+  if (!ACCESS_CONTEXT.test(s)) return null;
   if (REVOKED.test(s)) return 'revoked';
   if (GRANTED.test(s)) return 'granted';
   return null;

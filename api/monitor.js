@@ -251,6 +251,28 @@ async function recover(rec, recovered, why, downMs) {
   }).catch(() => { /* non-fatal */ });
 }
 
+/*
+ * The ping is the second opinion that stops a heartbeat problem being reported as
+ * a dead site. It only works if the site answers it.
+ *
+ * It used to identify itself as "TFM-Monitor/1.0 (+https://topfiremedia.com)",
+ * which is the polite thing to do and is exactly what WAFs and security plugins
+ * match on. Measured 3 Nov 2026 against the fleet: coconutkennysfranchise.com,
+ * ccsguaranteed.com and chopinacademy.com all killed that request in ~0.3s - not
+ * a timeout, an active refusal - while answering an ordinary browser in ~0.6s.
+ *
+ * On those sites the ping could never succeed, so the two-signal check quietly
+ * degraded to heartbeat-only and every heartbeat lapse became a false "Site Down".
+ * Coconut Kenny's alerted three times in one night that way while serving pages
+ * perfectly well.
+ *
+ * So the ping now looks like a browser. We are checking our own clients' sites
+ * for uptime, not crawling strangers, and the alternative is an alert channel
+ * that cries wolf.
+ */
+const PING_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36';
+
 async function ping(url) {
   try {
     const c = new AbortController();
@@ -259,7 +281,11 @@ async function ping(url) {
       method: 'GET',
       redirect: 'follow',
       signal: c.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TFM-Monitor/1.0; +https://topfiremedia.com)' },
+      headers: {
+        'User-Agent': PING_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
     });
     clearTimeout(t);
     return r.status > 0 && r.status < 500;

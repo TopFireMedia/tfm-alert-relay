@@ -1,4 +1,4 @@
-import { kvGet, kvSet, kvSAdd, kvConfigured } from '../lib/kv.js';
+import { kvGet, kvSet, kvSAdd, kvConfigured, kvClaim } from '../lib/kv.js';
 import { postAlert, hostOf } from '../lib/clickup.js';
 
 export default async function handler(req, res) {
@@ -48,16 +48,40 @@ export default async function handler(req, res) {
     await kvSAdd('sites', host);
   }
 
-  // Recovery: it was flagged down and just checked in again.
+  /*
+   * Recovery: it was flagged down and just checked in again.
+   *
+   * This is the SECOND place a "Recovered" notice can be emitted; monitor.js
+   * recover() is the other. That one has always suppressed recoveries shorter
+   * than RECOVER_NOTIFY_MS, because a site that was never really down does not
+   * need announcing. This path had no such guard and posted unconditionally,
+   * which is why the channel kept showing "Back up after ~0 min down" — a
+   * message monitor.js could not have produced. Seen on coconutkennysfranchise
+   * (Nov 1) and durafleet.wpenginepowered.com (Nov 6); both were false downs
+   * being cleared, and announcing the clear is just a second piece of noise
+   * about an event that never happened.
+   *
+   * The threshold must match monitor.js. It is duplicated rather than imported
+   * because api/ modules are separate serverless entry points and monitor.js
+   * pulls in TLS and digest code this endpoint has no business loading on every
+   * heartbeat.
+   */
+  const RECOVER_NOTIFY_MS = 15 * 60 * 1000; // keep in step with monitor.js
   if (prev && prev.status === 'down') {
-    const downMin = prev.down_since ? Math.round((now - prev.down_since) / 60000) : 0;
-    try {
-      await postAlert({
-        title: `🟢 Recovered — ${rec.site_name}`,
-        description: `**Site:** ${rec.site_name} (${site_url})\n**Back up** after ~${downMin} min down.\n**Plugin:** ${rec.plugin_version}`,
-        tags: [host, 'recovered'],
-      });
-    } catch (e) { /* non-fatal */ }
+    const downMs = prev.down_since ? now - prev.down_since : 0;
+    // Same claim key monitor.js uses, so the two paths cannot both announce the
+    // same recovery when a heartbeat and a monitor pass land together.
+    const worthSaying = downMs >= RECOVER_NOTIFY_MS;
+    const won = worthSaying && await kvClaim(`claim:recovered:${host}`, 30 * 60).catch(() => true);
+    if (won) {
+      try {
+        await postAlert({
+          title: `🟢 Recovered — ${rec.site_name}`,
+          description: `**Site:** ${rec.site_name} (${site_url})\n**Back up** after ~${Math.round(downMs / 60000)} min down.\n**Plugin:** ${rec.plugin_version}`,
+          tags: [host, 'recovered'],
+        });
+      } catch (e) { /* non-fatal */ }
+    }
   }
   return res.status(200).json({ ok: true });
 }

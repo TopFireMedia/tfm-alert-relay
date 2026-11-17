@@ -1,6 +1,8 @@
 import tls from 'node:tls';
 import { kvGet, kvMGet, kvSet, kvSMembers, kvConfigured, kvClaim } from '../lib/kv.js';
 import { postAlert, hostOf } from '../lib/clickup.js';
+import { ignoreReason, hostingCheck } from '../lib/hosts.js';
+import { recordWeekly, readWeekly } from '../lib/buckets.js';
 
 // "Down" means we have NOT heard from a site by ANY means — neither its outbound
 // heartbeat nor a successful inbound ping — for DOWN_AFTER_MS. A failed ping on
@@ -32,8 +34,33 @@ export default async function handler(req, res) {
   const sslResults = new Map();
   await Promise.all(sslDue.map(async (r) => { sslResults.set(r.host, await certDaysLeft(hostOf(r.site_url))); }));
 
-  const alerted = [], recovered = [];
+  /*
+   * Sites we do not host still report to us - the TFM plugin stays installed
+   * after a handover because the build depends on it - but the channel is for
+   * sites we can act on. Their events are tallied for the weekly digest instead,
+   * under a heading that says we do not host them. Fails safe: an empty host
+   * list means "cannot tell", and everything alerts as before.
+   */
+  const hosting = hostingCheck(await kvGet('on_server_hosts').catch(() => null));
+  const announce = async (rec, kind, payload) => {
+    if (hosting.isExternal(rec.host)) {
+      await recordWeekly('external', kind, rec.site_name || rec.host).catch(() => { /* non-fatal */ });
+      return;
+    }
+    return postAlert(payload);
+  };
+
+  const alerted = [], recovered = [], skippedHosts = [];
   await Promise.all(recs.map(async (rec, i) => {
+    /*
+     * Laptops, WP Engine internal hostnames and tunnels can all register
+     * themselves by heartbeating, then alert as "down" the moment they are
+     * switched off. They are skipped entirely rather than just silenced, so a
+     * stale record cannot consume a ping or an SSL check either.
+     */
+    const ignored = ignoreReason(rec.host);
+    if (ignored) { skippedHosts.push(`${rec.host} (${ignored})`); return; }
+
     const reachable = reachables[i];
     const lastSeen = rec.last_seen || 0;
     const wasDown = rec.status === 'down';
@@ -48,7 +75,7 @@ export default async function handler(req, res) {
         if (!rec.ssl_alerted) {
           rec.ssl_alerted = true; // once per expiry window
           if (await kvClaim(`claim:ssl:${rec.host}`, 24 * 60 * 60).catch(() => false))
-          postAlert({
+          announce(rec, 'ssl_expiring', {
             title: `🔒 SSL expiring — ${rec.site_name}`,
             description: `**Site:** ${rec.site_name} (${rec.site_url})\nTLS certificate expires in **${days} day(s)**${days < 0 ? ' (ALREADY EXPIRED)' : ''}. Renew it before it lapses.`,
             tags: [rec.host, 'ssl'],
@@ -65,7 +92,7 @@ export default async function handler(req, res) {
         rec.last_seen = now; rec.last_ping = now;
         await kvSet(`site:${rec.host}`, rec);
       }
-      if (wasDown) await recover(rec, recovered, 'a direct check succeeded', downMs);
+      if (wasDown) await recover(rec, recovered, 'a direct check succeeded', downMs, announce);
       return;
     }
 
@@ -74,7 +101,7 @@ export default async function handler(req, res) {
     if (wasDown && !stale) {
       rec.status = 'up'; rec.down_since = null; rec.ping_fails = 0;
       await kvSet(`site:${rec.host}`, rec);
-      await recover(rec, recovered, 'a heartbeat was received', downMs);
+      await recover(rec, recovered, 'a heartbeat was received', downMs, announce);
     } else if (!wasDown && stale) {
       rec.status = 'down'; rec.down_since = now;
       await kvSet(`site:${rec.host}`, rec);
@@ -88,7 +115,7 @@ export default async function handler(req, res) {
        */
       if (!(await kvClaim(`claim:down:${rec.host}`, ALERT_CLAIM_TTL_S).catch(() => true))) return;
       try {
-        await postAlert({
+        await announce(rec, 'site_down', {
           title: `🔴 Site Down — ${rec.site_name}`,
           description: `**Site:** ${rec.site_name} (${rec.site_url})\nNo heartbeat and no successful direct check for ~${quietMin} min.\n**Last plugin version:** ${rec.plugin_version}`,
           tags: [rec.host, 'down'],
@@ -100,7 +127,7 @@ export default async function handler(req, res) {
   }));
 
   const digested = await maybeDigestAndSnapshot(recs, now);
-  return res.status(200).json({ ok: true, checked: recs.length, alerted, recovered, ssl_checked: sslDue.length, digested });
+  return res.status(200).json({ ok: true, checked: recs.length - skippedHosts.length, alerted, recovered, skipped: skippedHosts, ssl_checked: sslDue.length, digested });
 }
 
 /**
@@ -136,32 +163,53 @@ async function balanceLine() {
  * fourteen lines. Returns an empty string when nothing happened, so a quiet week
  * does not add an empty heading.
  */
+const ACTION_LABELS = {
+  post_deleted: 'posts deleted',
+  core_updated: 'WordPress core updates',
+  plugin_activated: 'plugins activated',
+  site_down: 'site down notices',
+  recovered: 'recoveries',
+  ssl_expiring: 'certificates expiring',
+};
+
+function labelFor(action) {
+  return ACTION_LABELS[action] || String(action).replace(/_/g, ' ');
+}
+
 async function quietSummary(now) {
-  const labels = {
-    post_deleted: 'posts deleted',
-    core_updated: 'WordPress core updates',
-    plugin_activated: 'plugins activated',
-  };
-  const keys = [];
-  for (let back = 0; back < 2; back++) {
-    const d = new Date(now - back * 7 * 24 * 60 * 60 * 1000);
-    const y = d.getUTCFullYear();
-    const jan1 = Date.UTC(y, 0, 1);
-    const week = Math.ceil(((Date.UTC(y, d.getUTCMonth(), d.getUTCDate()) - jan1) / 86400000 + new Date(jan1).getUTCDay() + 1) / 7);
-    keys.push(`quiet:${y}-W${String(week).padStart(2, '0')}`);
-  }
-  const buckets = (await Promise.all(keys.map(k => kvGet(k).catch(() => null)))).filter(Boolean);
-  if (!buckets.length) return '';
-  const actions = {}, sites = new Set();
-  for (const b of buckets) {
-    for (const [a, n] of Object.entries(b.actions || {})) actions[a] = (actions[a] || 0) + n;
-    for (const s of Object.keys(b.sites || {})) sites.add(s);
-  }
+  const { actions, sites, found } = await readWeekly('quiet', 2, now);
+  if (!found) return '';
   const lines = Object.entries(actions)
     .sort((a, b) => b[1] - a[1])
-    .map(([a, n]) => `- ${n} ${labels[a] || a.replace(/_/g, ' ')}`);
+    .map(([a, n]) => `- ${n} ${labelFor(a)}`);
   if (!lines.length) return '';
-  return `\n\n**Routine changes this week** (logged, not alerted) — across ${sites.size} site(s)\n` + lines.join('\n');
+  return `\n\n**Routine changes this week** (logged, not alerted) — across ${Object.keys(sites).length} site(s)\n` + lines.join('\n');
+}
+
+/**
+ * Events from sites we do not host, as its own clearly labelled digest section.
+ *
+ * These never reach the channel. Handed-off sites keep the TFM plugin installed
+ * because too much of the build depends on it, so they report to us indefinitely;
+ * PowerLift was still posting "User Deleted" alerts long after moving to its own
+ * host. They are listed per site rather than per action, because the useful
+ * question about a site we do not host is "is this still reporting, and should it
+ * be?" rather than what happened on it.
+ */
+async function externalSummary(now) {
+  const { actions, sites, found } = await readWeekly('external', 2, now);
+  if (!found || !Object.keys(sites).length) return '';
+  const bySite = Object.entries(sites)
+    .sort((a, b) => b[1] - a[1])
+    .map(([site, n]) => `- ${site} — ${n} event(s)`);
+  const kinds = Object.entries(actions)
+    .sort((a, b) => b[1] - a[1])
+    .map(([a, n]) => `${n} ${labelFor(a)}`)
+    .join(', ');
+  return `\n\n**Sites we do not host** (not alerted — we cannot action these)\n`
+    + bySite.join('\n')
+    + (kinds ? `\n\n_${kinds}_` : '')
+    + `\n\nThese still run the TFM plugin and report to us. Worth reviewing whether that should continue.`;
 }
 
 // Aggregate fleet health for the daily snapshot and the weekly digest.
@@ -206,7 +254,7 @@ async function maybeDigestAndSnapshot(recs, now) {
      * channel stays for things needing attention soon. They still matter in
      * aggregate, so the digest is where they surface.
      */
-    const [quiet, balance] = await Promise.all([quietSummary(now), balanceLine()]);
+    const [quiet, balance, external] = await Promise.all([quietSummary(now), balanceLine(), externalSummary(now)]);
     try {
       await postAlert({
         title: `📊 Fleet weekly digest — ${agg.total} sites`,
@@ -217,7 +265,7 @@ async function maybeDigestAndSnapshot(recs, now) {
           `Update issues: ${agg.update_issues}\n` +
           `Custom code to migrate: ${agg.custom_code}\n` +
           `SCF active: ${agg.scf}\n` +
-          `Indexing off: ${agg.index_off}` + balance + quiet,
+          `Indexing off: ${agg.index_off}` + balance + quiet + external,
         tags: ['digest'],
       });
       digested = true;
@@ -239,12 +287,12 @@ function cmpVer(a, b) {
   return 0;
 }
 
-async function recover(rec, recovered, why, downMs) {
+async function recover(rec, recovered, why, downMs, announce) {
   recovered.push(rec.host);
   if (downMs < RECOVER_NOTIFY_MS) return; // brief blip / false down being cleared — recover silently
   // Same race as the down path: one claim, one notice.
   if (!(await kvClaim(`claim:recovered:${rec.host}`, ALERT_CLAIM_TTL_S).catch(() => true))) return;
-  postAlert({
+  announce(rec, 'recovered', {
     title: `🟢 Recovered — ${rec.site_name}`,
     description: `**Site:** ${rec.site_name} (${rec.site_url})\nBack up after ~${Math.round(downMs / 60000)} min — ${why}.\n**Plugin:** ${rec.plugin_version}`,
     tags: [rec.host, 'recovered'],

@@ -1,25 +1,7 @@
 import { postAlert, hostOf, pretty } from '../lib/clickup.js';
-import { kvGet, kvSet } from '../lib/kv.js';
-
-/**
- * Tally a quiet event into the current week's bucket for the digest to report.
- *
- * Keyed by ISO week so the bucket rolls over on its own and nothing has to be
- * cleaned up. Counts per action and per site, not individual events: the digest
- * wants "14 posts deleted across 3 sites", not fourteen lines.
- */
-async function recordQuiet(action, site) {
-  const d = new Date();
-  const y = d.getUTCFullYear();
-  const jan1 = Date.UTC(y, 0, 1);
-  const week = Math.ceil(((Date.UTC(y, d.getUTCMonth(), d.getUTCDate()) - jan1) / 86400000 + new Date(jan1).getUTCDay() + 1) / 7);
-  const key = `quiet:${y}-W${String(week).padStart(2, '0')}`;
-  const bucket = (await kvGet(key)) || { actions: {}, sites: {} };
-  bucket.actions[action] = (bucket.actions[action] || 0) + 1;
-  bucket.sites[site] = (bucket.sites[site] || 0) + 1;
-  bucket.updated = Date.now();
-  await kvSet(key, bucket);
-}
+import { kvGet } from '../lib/kv.js';
+import { recordWeekly } from '../lib/buckets.js';
+import { hostingCheck } from '../lib/hosts.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -53,8 +35,21 @@ export default async function handler(req, res) {
       .split(',').map(s => s.trim()).filter(Boolean)
   );
   if (QUIET.has(action)) {
-    await recordQuiet(action, site_name || hostOf(site_url)).catch(() => { /* never fail the site's request */ });
+    await recordWeekly('quiet', action, site_name || hostOf(site_url)).catch(() => { /* never fail the site's request */ });
     return res.status(200).json({ ok: true, logged: action, posted: false });
+  }
+
+  /*
+   * Sites we no longer host do not go to the channel at all, whatever the
+   * severity. We cannot act on them, and the plugin stays installed after a
+   * handover because the build depends on it, so without this they alert forever.
+   * They are still tallied, and the weekly digest reports them under a heading
+   * that says plainly that they are not ours.
+   */
+  const hosting = hostingCheck(await kvGet('on_server_hosts').catch(() => null));
+  if (hosting.isExternal(hostOf(site_url))) {
+    await recordWeekly('external', action, site_name || hostOf(site_url)).catch(() => { /* never fail the site's request */ });
+    return res.status(200).json({ ok: true, logged: action, posted: false, reason: 'not hosted by us' });
   }
 
   if (process.env.ALLOWED_DOMAINS) {

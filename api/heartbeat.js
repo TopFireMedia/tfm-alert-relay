@@ -1,5 +1,6 @@
 import { kvGet, kvSet, kvSAdd, kvConfigured, kvClaim } from '../lib/kv.js';
 import { postAlert, hostOf } from '../lib/clickup.js';
+import { ignoreReason } from '../lib/hosts.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -10,6 +11,18 @@ export default async function handler(req, res) {
   body = body || {};
   const { site_url, site_name, plugin_version, php_version, wp_version, custom_scripts, scf_active, search_indexing, auto_update, update_token_set, cookie_consent } = body;
   if (!site_url) return res.status(400).json({ error: 'missing site_url' });
+
+  /*
+   * Do not let non-production installs join the fleet. A developer's local copy
+   * registered itself on 4 Nov 2026 and alerted as down once it was deleted; two
+   * WP Engine internal hostnames did the same on 6 Nov. Accepting the heartbeat
+   * (200) rather than erroring keeps those installs quiet in their own logs -
+   * they are not misbehaving, they just should not be monitored.
+   */
+  const notMonitorable = ignoreReason(hostOf(site_url));
+  if (notMonitorable) {
+    return res.status(200).json({ ok: true, monitored: false, reason: notMonitorable });
+  }
 
   const host = hostOf(site_url);
   const now = Date.now();
